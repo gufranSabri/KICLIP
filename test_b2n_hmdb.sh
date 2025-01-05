@@ -1,14 +1,14 @@
 ROOT=./
-CKPT=./ckpt/basetraining/B2N_hmdb51_froster
-OUT_DIR=$CKPT/testing
-LOAD_CKPT_FILE=$ROOT/basetraining/B2N_hmdb51_froster/wa_checkpoints/swa_2_22.pth
+CKPT=./basetraining/B2N_hmdb51_froster
+OUT_DIR=./basetraining/B2N_hmdb51_froster/testing
+LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_froster/wa_checkpoints/swa_2_22.pth
 
 # TEST_FILE can be set as val.csv (base set) or test.csv (novel set).
 # rephrased_file can be set as train_rephrased.json (base set) or test_rephrased.json (novel set)
 # NUM_CLASSES can be set as 26 (base set) or 25 (novel set)
 TRAIN_FILE=train.csv
 VAL_FILE=val.csv
-TEST_FILE=val.csv
+TEST_FILE=test.csv
 rephrased_file=train_rephrased.json
 NUM_CLASSES=26
 
@@ -25,8 +25,8 @@ python3 -W ignore -u test_b2n.py \
     DATA.INDEX_LABEL_MAPPING_FILE ./zs_label_db/B2N_hmdb/$rephrased_file \
     TRAIN.ENABLE False \
     OUTPUT_DIR $OUT_DIR \
-    TEST.BATCH_SIZE 480 \
-    NUM_GPUS 8 \
+    TEST.BATCH_SIZE 4 \
+    NUM_GPUS 1 \
     DATA.DECODING_BACKEND "pyav" \
     MODEL.NUM_CLASSES $NUM_CLASSES \
     TEST.CUSTOM_LOAD True \

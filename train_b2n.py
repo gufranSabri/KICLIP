@@ -219,7 +219,7 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg):
     avg_top1_err = total_top1_err / data_size
     avg_top5_err = total_top5_err / data_size
 
-    print(f"Epoch {cur_epoch} Summary:")
+    print(f"Epoch {cur_epoch+1} Summary:")
     print(f"  Average Loss: {avg_loss:.4f}")
     print(f"  Average Gradient Norm: {avg_grad_norm:.4f}")
     print(f"  Top-1 Error: {avg_top1_err:.2f}%")
@@ -293,7 +293,7 @@ def eval_epoch(loader, model, cur_epoch, cfg):
     avg_top1_err = total_top1_err / num_samples
     avg_top5_err = total_top5_err / num_samples
 
-    print(f"Evaluation Epoch {cur_epoch} Summary:")
+    print(f"Evaluation Epoch {cur_epoch+1} Summary:")
     print(f"  Average Loss: {avg_loss:.4f}")
     print(f"  Top-1 Error: {avg_top1_err:.2f}%")
     print(f"  Top-5 Error: {avg_top5_err:.2f}%")
@@ -334,7 +334,7 @@ def train():
         print(f"Epoch [{cur_epoch+1}/{cfg.SOLVER.MAX_EPOCH}]")
         train_epoch(train_loader, model, optimizer, scaler, cur_epoch, cfg)
         eval_epoch(val_loader, model, cur_epoch, cfg)
-        print("================================================")
+        print("====================================================================================\n")
 
         cu.save_checkpoint(
             cfg.OUTPUT_DIR,

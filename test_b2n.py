@@ -4,7 +4,8 @@ import random
 import numpy as np
 from tqdm import tqdm
 import torch
-from datasets import loader
+from datasets.build import build_dataset
+from datasets import utils
 from utils.env import pathmgr
 from utils.meters import TestMeter
 from utils.parser import load_config, parse_args
@@ -12,8 +13,40 @@ import utils.checkpoint as cu
 from config.defaults import assert_and_infer_cfg
 from models.temporalclip_video_model import TemporalClipVideo
 
+
+def construct_loader(cfg, split="train"):
+    shuffle = False
+    drop_last = False
+
+    if split in ["train"]:
+        dataset_name = cfg.TRAIN.DATASET
+        batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
+        shuffle = True
+        drop_last = True
+    elif split in ["val"]:
+        dataset_name = cfg.TRAIN.DATASET
+        batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
+    elif split in ["test", "test_openset"]:
+        dataset_name = cfg.TEST.DATASET
+        batch_size = int(cfg.TEST.BATCH_SIZE / max(1, cfg.NUM_GPUS))
+
+    dataset = build_dataset(dataset_name, cfg, split)
+    
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        num_workers=cfg.DATA_LOADER.NUM_WORKERS,
+        pin_memory=cfg.DATA_LOADER.PIN_MEMORY,
+        worker_init_fn=utils.loader_worker_init_fn(dataset),
+    )
+
+    return loader
+
 def perform_test(loader, model, test_meter, cfg):
     model.eval()
+    test_meter.iter_tic()
 
     for cur_iter, (inputs, labels, video_idx, time, meta) in tqdm(enumerate(loader), total=len(loader)):
         if cfg.NUM_GPUS:
@@ -32,17 +65,24 @@ def perform_test(loader, model, test_meter, cfg):
                 else:
                     meta[key] = val.to(cfg.DEVICE)
 
+            test_meter.data_toc()
+
             preds = None
-            if cfg.MODEL.KEEP_RAW_MODEL and cfg.MODEL.ENSEMBLE_PRED:
-                preds, raw_preds = model(inputs)
-                preds = cfg.MODEL.ENSEMBLE_RAWMODEL_RATIO * raw_preds + (1 - cfg.MODEL.ENSEMBLE_RAWMODEL_RATIO) * preds
-            else:
-                preds = model(inputs)
+            with torch.no_grad():
+                if cfg.MODEL.KEEP_RAW_MODEL and cfg.MODEL.ENSEMBLE_PRED:
+                    preds, raw_preds = model(inputs)
+                    preds = cfg.MODEL.ENSEMBLE_RAWMODEL_RATIO * raw_preds + (1 - cfg.MODEL.ENSEMBLE_RAWMODEL_RATIO) * preds
+                else:
+                    preds = model(inputs)
+            torch.cuda.empty_cache()  
 
             if cfg.NUM_GPUS:
                 preds = preds.cpu()
                 labels = labels.cpu()
                 video_idx = video_idx.cpu()
+
+            test_meter.iter_toc()
+            test_meter.update_stats(preds.detach(), labels.detach(), video_idx.detach())
 
             test_meter.log_iter_stats(cur_iter) 
             test_meter.iter_tic()
@@ -63,7 +103,7 @@ def perform_test(loader, model, test_meter, cfg):
     test_meter.finalize_metrics()
     return test_meter
             
-def test(cfg):
+def test():
     args = parse_args()
     for path_to_config in args.cfg_files:
         cfg = load_config(args, path_to_config)
@@ -112,7 +152,7 @@ def test(cfg):
             
             model.load_state_dict(checkpoint_model, strict=False)
 
-            test_loader = loader.construct_loader(cfg, "test")
+            test_loader = construct_loader(cfg, "test")
 
             test_meter = TestMeter(
                 test_loader.dataset.num_videos // (cfg.TEST.NUM_ENSEMBLE_VIEWS * cfg.TEST.NUM_SPATIAL_CROPS),
@@ -131,4 +171,7 @@ def test(cfg):
         print("View: {}".format(view))
         print("Top1 Acc: {}".format(test_meter.stats["top1_acc"]))
         print("Top5 Acc: {}".format(test_meter.stats["top5_acc"]))
-        print("=====================================")
+        print("=====================================\n")
+
+if __name__ == "__main__":
+    test()
