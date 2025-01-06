@@ -21,11 +21,9 @@ class TemporalClipVideo(nn.Module):
         self.device = cfg.DEVICE
         self.cfg = cfg
         self._construct_network(cfg)
+        self.num_pathways = 1
 
         self.model.eval()
-
-        for k, v in self.model.named_parameters():
-            v.requires_grad = True
 
         for k, v in self.model.named_parameters():
             v.requires_grad = True
@@ -67,7 +65,10 @@ class TemporalClipVideo(nn.Module):
             print("ensemble pred cannot not exist together with record-routing")
             exit()
         
-        if self.text_prompting:
+        if self.tune_head:
+            self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
+            self.head = torch.nn.Parameter(self.dynamic_classifier, requires_grad=True)
+        elif self.text_prompting:
             self.prompt_num = int(cfg.MODEL.PROMPT_NUM)
             embedding_dim = self.model.ln_final.weight.shape[0]
             
@@ -82,16 +83,20 @@ class TemporalClipVideo(nn.Module):
                 id2cls[int(idx)] = cls
             self.classnames = [id2cls[i] for i in range(len(id2cls))]
             prompts = [" ".join(["X"] * self.prompt_num) + " " + name + "." for name in self.classnames]
-            tokenized_prompts = torch.cat([tokenize(p, context_length=self.context_length) for p in prompts])
-            self.tokenized_prompts = tokenized_prompts
+            tokenized_prompts = torch.cat([clip.tokenize(p, context_length=self.context_length) for p in prompts])
+            tokenized_prompts = tokenized_prompts.to(cfg.DEVICE)
+
+            with torch.no_grad():
+                embedding = self.model.token_embedding(tokenized_prompts)
+            self.token_prefix = embedding[:, :1, :]  # SOT
+            self.token_suffix = embedding[:, 1 + self.prompt_num:, :]  # CLS, EOT
+            self.tokenized_prompts = tokenized_prompts  # for localizing EOT
             
             for _, param in self.model.transformer.named_parameters():
                 param.requires_grad = False
         else:
             self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
 
-        self.alpha = 0.1
-        
         self.lr_factor = {
             "message": cfg.MODEL.FINETUNE_FACTOR,
             "stadapt": cfg.MODEL.ADAPT_FINETUNE_FACTOR,
@@ -102,42 +107,43 @@ class TemporalClipVideo(nn.Module):
 
     def _construct_network(self, cfg):
         context_length = cfg.MODEL.CONTEXT_LENGTH
-
         if cfg.MODEL.ARCH == 'vitb16':
-            self.model, self.preprocess = load(
-                "ViT-B/16", 
-                jit=False, 
+            self.model, self.preprocess = load("ViT-B/16", jit=False, 
                 T=cfg.DATA.NUM_FRAMES, 
                 temporal_modeling_type=cfg.MODEL.TEMPORAL_MODELING_TYPE,
-                use_checkpoint=cfg.MODEL.USE_CHECKPOINT,
+                use_checkpoint=cfg.MODEL.USE_CHECKPOINT, 
                 context_length=context_length,
                 num_experts=cfg.MODEL.NUM_EXPERTS, 
                 expert_insert_layers=cfg.MODEL.EXPERT_INSERT_LAYERS,
-                record_routing=cfg.MODEL.RECORD_ROUTING,
+                record_routing=cfg.MODEL.RECORD_ROUTING, 
                 routing_type=cfg.MODEL.ROUTING_TYPE
             )
             if cfg.MODEL.KEEP_RAW_MODEL:   
-                self.raw_model, self.preprocess = load(
-                    "ViT-B/16", 
-                    jit=False, 
+                self.raw_model, self.preprocess = load("ViT-B/16", jit=False, 
                     T=cfg.DATA.NUM_FRAMES, 
                     temporal_modeling_type=None,
                     use_checkpoint=cfg.MODEL.USE_CHECKPOINT, 
                     context_length=context_length,
-                    num_experts=cfg.MODEL.NUM_EXPERTS,
+                    num_experts=cfg.MODEL.NUM_EXPERTS, 
                     expert_insert_layers=cfg.MODEL.EXPERT_INSERT_LAYERS,
                     record_routing=cfg.MODEL.RECORD_ROUTING, 
                     routing_type=cfg.MODEL.ROUTING_TYPE
                 )
-                for _, p in self.raw_model.named_parameters():
+                for name, p in self.raw_model.named_parameters():
                     p.requires_grad = False
         else:
             raise NotImplementedError
+
+        self.model.float() 
+        if cfg.MODEL.KEEP_RAW_MODEL:
+            self.raw_model.float()
 
     def update_state(self):
         self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
 
     def forward(self, x=None, update=False): # x: [bz, channel, clip_len, h, w]
+        assert len(x) == self.num_pathways
+
         x = x[0]
         if len(x.shape) == 4:
             x = x.unsqueeze(2) # image input
@@ -151,14 +157,20 @@ class TemporalClipVideo(nn.Module):
         
         img_encode = self.model.encode_image(x) # [bz, feat_size]
 
+        feature = None
         if isinstance(img_encode, list):
-            img_encode, _ = img_encode
+            img_encode, feature = img_encode
+            c = feature.shape[-1]
 
         if self.training: # text_dict  {id: [400, feat_size]},
             img_encode = img_encode / img_encode.norm(dim=-1, keepdim=True) #normalization
             
             # logit_scale: scale the similarity scores between two modalities; helps to adjust the temperature in the softmax operation
-            if self.text_prompting:
+            if self.tune_head:
+                norm_head = self.head / self.head.norm(dim=-1, keepdim=True)
+                pred = self.model.logit_scale.exp() * img_encode @ norm_head.T
+            elif self.text_prompting:
+                # encode head.
                 text_embedding = torch.cat(
                     (
                         self.token_prefix, 
@@ -178,14 +190,16 @@ class TemporalClipVideo(nn.Module):
             
             # residual distillation
             if self.keep_raw_model and (self.ensemble_pred or self.distillation):
-                with torch.no_grad():
-                    raw_img_encode = self.raw_model.encode_image(x)[0]
-                    raw_img_encode = raw_img_encode / raw_img_encode.norm(dim=-1, keepdim=True)
+                raw_img_encode = self.raw_model.encode_image(x)
+                if isinstance(raw_img_encode, list):
+                    raw_img_encode = raw_img_encode[0]
+                raw_img_encode /= raw_img_encode.norm(dim=-1, keepdim=True)
 
                 dynamic_classifier_raw = self.achieve_csf_matrix(text_dict, self.raw_model, trainable=False)
                 
-                img_encode = img_encode + self.alpha * self.projector_v(img_encode)
-                dynamic_classifier_new = dynamic_classifier_new + self.alpha * self.projector_t(dynamic_classifier_new)
+                alpha = 0.1
+                img_encode = img_encode + alpha * self.projector_v(img_encode)
+                dynamic_classifier_new = dynamic_classifier_new + alpha * self.projector_t(dynamic_classifier_new)
 
                 return [pred, img_encode, dynamic_classifier_new], [None, raw_img_encode, dynamic_classifier_raw]
 
@@ -194,7 +208,11 @@ class TemporalClipVideo(nn.Module):
         else: # dynamic_clf: [type_num * cls_num, feat_size]
             img_encode /= img_encode.norm(dim=-1, keepdim=True)
 
-            if self.text_prompting:
+            if self.tune_head:
+                norm_head = self.head / self.head.norm(dim=-1, keepdim=True)
+                pred = self.model.logit_scale.exp() * img_encode @ norm_head.T
+
+            elif self.text_prompting:
                 text_embedding = torch.cat(
                     (
                         self.token_prefix, 

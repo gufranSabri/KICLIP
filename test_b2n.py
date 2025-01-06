@@ -82,7 +82,8 @@ def perform_test(loader, model, test_meter, cfg):
                 video_idx = video_idx.cpu()
 
             test_meter.iter_toc()
-            test_meter.update_stats(preds.detach(), labels.detach(), video_idx.detach())
+            if not cfg.VIS_MASK.ENABLE:
+                test_meter.update_stats(preds.detach(), labels.detach(), video_idx.detach())
 
             test_meter.log_iter_stats(cur_iter) 
             test_meter.iter_tic()
@@ -132,12 +133,14 @@ def test():
     for num_view in cfg.TEST.NUM_TEMPORAL_CLIPS:
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
-        model = TemporalClipVideo(cfg).to(cfg.DEVICE)
+        model = TemporalClipVideo(cfg)
 
         if not cfg.TEST.CUSTOM_LOAD:
             cu.load_test_checkpoint(cfg, model)
 
         if cfg.TEST.CUSTOM_LOAD:
+            # print(cfg.TEST.PATCHING_MODEL and cfg.TEST.CLIP_ORI_PATH)
+
             custom_load_file = cfg.TEST.CUSTOM_LOAD_FILE
 
             checkpoint = torch.load(custom_load_file, map_location='cpu')
@@ -150,7 +153,8 @@ def test():
                     new_checkpoint_model['module.' + key] = value
                 checkpoint_model = new_checkpoint_model
             
-            model.load_state_dict(checkpoint_model, strict=False)
+            model.load_state_dict(checkpoint_model, strict=True)
+            model = model.to(cfg.DEVICE)
 
             test_loader = construct_loader(cfg, "test")
 
