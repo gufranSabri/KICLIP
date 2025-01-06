@@ -159,9 +159,10 @@ class TSTransformer(nn.Module):
         self.record_routing = record_routing
         self.routing_type = routing_type
 
+        # 12 layers of TimesAttentionBlock
         if self.temporal_modeling_type == None:
             self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask, num_experts, record_routing, routing_type) if layer_id in expert_insert_layers else ResidualAttentionBlock(width, heads, attn_mask, record_routing=record_routing, routing_type=routing_type) for layer_id in range(layers)])
-        elif self.temporal_modeling_type == 'expand_temporal_view' or self.temporal_modeling_type == 'expand_temporal_view_step2' or self.temporal_modeling_type == 'expand_temporal_view_step3':# TimesAttentionBlock
+        elif self.temporal_modeling_type == 'expand_temporal_view' or self.temporal_modeling_type == 'expand_temporal_view_step2' or self.temporal_modeling_type == 'expand_temporal_view_step3':
             self.resblocks = nn.Sequential(*[TimesAttentionBlock(width, heads, attn_mask, T=T, temporal_modeling_type=self.temporal_modeling_type) for _ in range(layers)])
 
     def forward(self, x, prompt_token=None):
@@ -175,7 +176,6 @@ class TSTransformer(nn.Module):
                         x[-1, :, :] = x[-1, :, :] + prompt_token.view(b, c)
                 return x
             else:
-                # return self.resblocks(x)
                 for block in self.resblocks:
                     x = block(x)
                     l, b, c = x.size()
@@ -212,30 +212,30 @@ class TemporalVisionTransformer(nn.Module):
 
     def forward(self, x):
         x, [maskf, mask] = x
-        x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-        x = x.permute(0, 2, 1).contiguous()  # shape = [*, grid ** 2, width] # (bxt) l c
+        x = self.conv1(x) #[b*T, 768, 14, 14]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # [b*T, 768, 196]
+        x = x.permute(0, 2, 1).contiguous()  # [b*T, 196, 768]
         B, l, c = x.shape
         b = B // self.T
 
-        cls_token = self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device)
-        x = torch.cat([cls_token, x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding.to(x.dtype)
-        x = self.ln_pre(x)
+        cls_token = self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device) #[b*T, 1, 768]
+        x = torch.cat([cls_token, x], dim=1)  # [b*T, 197, 768]
+        x = x + self.positional_embedding.to(x.dtype) #[b*T, 197, 768]
+        x = self.ln_pre(x) #[b*T, 197, 768]
 
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = x.permute(1, 0, 2)  # [197, b*T, 768]
         
         if self.record_routing:
             x, routing_state = self.transformer(x)
         else:
-            x = self.transformer(x)
+            x = self.transformer(x) #[197, b*T, 768]
         
-        feature = x.permute(1, 0, 2)  # LND -> NLD
+        feature = x.permute(1, 0, 2)  # [b*T, 197, 768]
 
-        x = self.ln_post(feature[:, 0, :])
+        x = self.ln_post(feature[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
 
         if self.proj is not None:
-            x = x @ self.proj
+            x = x @ self.proj #[b*T, num_classes]
         
         # if self.record_routing:
         #     return [x, feature], routing_state

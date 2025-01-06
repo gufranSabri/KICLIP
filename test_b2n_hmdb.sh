@@ -15,7 +15,7 @@ NUM_CLASSES=25
 
 cd $ROOT
 
-python3 -W ignore -u test_b2n.py \
+python -W ignore -u test_b2n.py \
     --cfg ./config_files/Kinetics/TemporalCLIP_vitb16_8x16_STAdapter_HMDB51.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_hmdb \
     DATA.PATH_PREFIX ./data/hmdb51/videos \
@@ -48,7 +48,7 @@ NUM_CLASSES=26
 
 cd $ROOT
 
-python3 -W ignore -u test_b2n.py \
+python -W ignore -u test_b2n.py \
     --cfg ./config_files/Kinetics/TemporalCLIP_vitb16_8x16_STAdapter_HMDB51.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_hmdb \
     DATA.PATH_PREFIX ./data/hmdb51/videos \

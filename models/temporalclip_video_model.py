@@ -141,7 +141,7 @@ class TemporalClipVideo(nn.Module):
     def update_state(self):
         self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
 
-    def forward(self, x=None, update=False): # x: [bz, channel, clip_len, h, w]
+    def forward(self, x=None, update=False):
         assert len(x) == self.num_pathways
 
         x = x[0]
@@ -154,14 +154,12 @@ class TemporalClipVideo(nn.Module):
         bz, channel_dim, clip_len, h, w = x.shape
         x = x.permute(0, 2, 1, 3, 4)
         x = x.reshape(bz*clip_len, channel_dim, h, w)
-        
-        img_encode = self.model.encode_image(x) # [bz, feat_size]
 
-        feature = None
+        img_encode = self.model.encode_image(x) # [b*T, feat_size]
+
         if isinstance(img_encode, list):
-            img_encode, feature = img_encode
-            c = feature.shape[-1]
-
+            img_encode, _ = img_encode
+        
         if self.training: # text_dict  {id: [400, feat_size]},
             img_encode = img_encode / img_encode.norm(dim=-1, keepdim=True) #normalization
             
@@ -182,12 +180,12 @@ class TemporalClipVideo(nn.Module):
                 norm_head /= norm_head.norm(dim=-1, keepdim=True)
                 pred = self.model.logit_scale.exp() * img_encode @ norm_head.T
             else:
-                text_dict = self.text_prompt(os.path.join(self.cfg.DATA.INDEX_LABEL_MAPPING_FILE))
-                dynamic_classifier_new = self.achieve_csf_matrix(text_dict, self.model, trainable=True)
-                pred = self.model.logit_scale.exp() * img_encode @ dynamic_classifier_new.T
-
+                text_dict = self.text_prompt(os.path.join(self.cfg.DATA.INDEX_LABEL_MAPPING_FILE)) 
+                dynamic_classifier_new = self.achieve_csf_matrix(text_dict, self.model, trainable=True) #[num_classes, 512]
+                pred = self.model.logit_scale.exp() * img_encode @ dynamic_classifier_new.T # [128, 512] * [512, num_classes] = [128, num_classes]
+                
             pred = pred.reshape(bz, clip_len, -1).mean(1)
-            
+
             # residual distillation
             if self.keep_raw_model and (self.ensemble_pred or self.distillation):
                 raw_img_encode = self.raw_model.encode_image(x)
@@ -205,7 +203,7 @@ class TemporalClipVideo(nn.Module):
 
             return pred
         
-        else: # dynamic_clf: [type_num * cls_num, feat_size]
+        else:
             img_encode /= img_encode.norm(dim=-1, keepdim=True)
 
             if self.tune_head:
@@ -233,6 +231,8 @@ class TemporalClipVideo(nn.Module):
                         
             if self.keep_raw_model and (self.ensemble_pred or self.distillation):
                 return [pred, None], [None, None]
+
+            
             
             return pred
     
@@ -273,25 +273,25 @@ class TemporalClipVideo(nn.Module):
         id2cls = {}
         temp_mapping = json.load(open(data_file, 'r'))
         for key in temp_mapping:
-            id2cls[int(key)] = temp_mapping[key]
+            id2cls[int(key)] = temp_mapping[key] # dict version of train_rephrased.json
 
         cls_num = len(id2cls)
         if self.training:
             index = random.randint(0, len(text_aug)-2)
-            text_aug = [text_aug[index], text_aug[-1]]
+            text_aug = [text_aug[index], text_aug[-1]] #take a random rephrasalal and the default text
 
-        for idx, txt in enumerate(text_aug):
+        for idx, txt in enumerate(text_aug): #tokenizes
             if idx == len(text_aug)-1:
                 text_dict[idx] = torch.cat([tokenize(txt.format(id2cls[id])) for id in range(cls_num)])
             else:
                 text_dict[idx] = torch.cat([tokenize(txt.format(id2cls[id].split(':')[0]) + ' ' + id2cls[id]) for id in range(cls_num)])
-
+        
         return text_dict
         
-    def achieve_csf_matrix(self, text_dict, model, trainable=False):
+    def achieve_csf_matrix(self, text_dict, model, trainable=False): # contextual semantic feature matrix
         if not trainable:
             with torch.no_grad():
-                csf_matrix_list = [model.encode_text(text_dict[i].to(self.device)).detach() for i in range(len(text_dict))]
+                csf_matrix_list = [model.encode_text(text_dict[i].to(self.device)).detach() for i in range(len(text_dict))] #encode the prompts
                 for csf_matrix in csf_matrix_list:
                     csf_matrix = csf_matrix / csf_matrix.norm(dim=-1, keepdim=True)
         else:
@@ -299,7 +299,7 @@ class TemporalClipVideo(nn.Module):
             for csf_matrix in csf_matrix_list:
                 csf_matrix = csf_matrix / csf_matrix.norm(dim=-1, keepdim=True)
         
-        csf_matrix = torch.stack(csf_matrix_list, 0).mean(0)
+        csf_matrix = torch.stack(csf_matrix_list, 0).mean(0) #average out the default text + rephrased prompt features
         csf_matrix = csf_matrix / csf_matrix.norm(dim=-1, keepdim=True)
         
         return csf_matrix
@@ -339,7 +339,7 @@ class WCLIP(CLIP):
         
         self.vision_width = vision_width
         vision_heads = vision_width // 64
-        self.visual = TemporalVisionTransformer(
+        self.visual = TemporalVisionTransformer( # model.img_encode()
             input_resolution=image_resolution,
             patch_size=vision_patch_size,
             width=vision_width,
