@@ -221,9 +221,12 @@ def load_checkpoint(
     """
     logger.info("Loading network weights from {}.".format(path_to_checkpoint))
 
+    print("LOADINGGGGGGGGGGGG0")
+
     # Account for the DDP wrapper in the multi-gpu setting.
     ms = model.module if data_parallel else model
     if convert_from_caffe2:
+        print("LOADINGGGGGGGGGGGG1")
         with pathmgr.open(path_to_checkpoint, "rb") as f:
             caffe2_checkpoint = pickle.load(f, encoding="latin1")
         state_dict = OrderedDict()
@@ -293,6 +296,7 @@ def load_checkpoint(
         ms.load_state_dict(state_dict, strict=False)
         epoch = -1
     else:
+        print("LOADINGGGGGGGGGGGG2")
         # Load the checkpoint on CPU to avoid GPU mem spike.
         with pathmgr.open(path_to_checkpoint, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")

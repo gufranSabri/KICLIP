@@ -1,4 +1,5 @@
 import pprint
+import os
 import random
 import numpy as np
 from tqdm import tqdm
@@ -19,6 +20,8 @@ from models.contrastive import (
     contrastive_forward,
     contrastive_parameter_surgery,
 )
+from logger import Logger
+import datetime
 
 def construct_optimizer(model, cfg):
     bn_parameters = []
@@ -109,7 +112,7 @@ def construct_loader(cfg, split="train"):
 
     return loader
 
-def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter):
+def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, logger):
     model.train()
     train_meter.iter_tic()
     data_size = len(loader)
@@ -137,7 +140,11 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter):
             if not isinstance(labels, list):
                 labels = labels.to(cfg.DEVICE)
                 index = index.to(cfg.DEVICE)
-                time = time.to(cfg.DEVICE)
+
+                if cfg.DEVICE == "mps":
+                    time = time.float().to(cfg.DEVICE)    
+                else:
+                    time = time.to(cfg.DEVICE)
             for key, val in meta.items():
                 if isinstance(val, (list,)):
                     for i in range(len(val)):
@@ -158,9 +165,13 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter):
 
         optimizer.zero_grad()
 
-        with torch.amp.autocast(cfg.DEVICE, enabled=cfg.TRAIN.MIXED_PRECISION):
-            perform_backward = True
-            optimizer.zero_grad()
+        perform_backward = True
+        if cfg.DEVICE == 'mps':
+            with torch.cuda.amp.autocast(enabled=cfg.TRAIN.MIXED_PRECISION):
+                optimizer.zero_grad()
+        else:
+            with torch.amp.autocast(cfg.DEVICE, enabled=cfg.TRAIN.MIXED_PRECISION):
+                optimizer.zero_grad()
 
         if cfg.MODEL.KEEP_RAW_MODEL and cfg.MODEL.RAW_MODEL_DISTILLATION:
             outputs = model(inputs)
@@ -180,8 +191,8 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter):
             distillation_loss = distillation_loss_1 + distillation_loss_2
 
             # if cur_iter % cfg.LOG_PERIOD == 0:
-            #     print('Distillation Loss: %.8f'%distillation_loss.item())
-            #     print('Distillation Loss Ratio: %f'%cfg.MODEL.DISTILLATION_RATIO)
+            #     logger('Distillation Loss: %.8f'%distillation_loss.item())
+            #     logger('Distillation Loss Ratio: %f'%cfg.MODEL.DISTILLATION_RATIO)
 
             loss += cfg.MODEL.DISTILLATION_RATIO * distillation_loss
 
@@ -256,11 +267,13 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter):
 
         train_meter.iter_toc()
         train_meter.log_iter_stats(cur_epoch, cur_iter)
-        torch.cuda.synchronize()
+
+        if cfg.DEVICE == 'cuda':
+            torch.cuda.synchronize()
         train_meter.iter_tic()
 
     del inputs
-    if torch.cuda.is_available():
+    if cfg.DEVICE == 'cuda':
         torch.cuda.empty_cache()
     
     epoch_top1_err = total_top1_err / total_samples
@@ -268,17 +281,17 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter):
     epoch_top1_acc = 100.0 - epoch_top1_err
     epoch_top5_acc = 100.0 - epoch_top5_err
 
-    print("---------------------------------------------------------------------------")
-    print(f"Epoch {cur_epoch} Training Results:")
-    print(f"Top-1 Error: {epoch_top1_err:.2f}% | Top-5 Error: {epoch_top5_err:.2f}%")
-    print(f"Top-1 Accuracy: {epoch_top1_acc:.2f}% | Top-5 Accruacy: {epoch_top5_acc:.2f}%")
-    print("---------------------------------------------------------------------------")
+    logger("---------------------------------------------------------------------------")
+    logger(f"Epoch {cur_epoch} Training Results:")
+    logger(f"Top-1 Error: {epoch_top1_err:.2f}% | Top-5 Error: {epoch_top5_err:.2f}%")
+    logger(f"Top-1 Accuracy: {epoch_top1_acc:.2f}% | Top-5 Accruacy: {epoch_top5_acc:.2f}%")
+    logger("---------------------------------------------------------------------------")
 
     train_meter.log_epoch_stats(cur_epoch)
     train_meter.reset()
 
 @torch.no_grad()
-def eval_epoch(loader, model, cur_epoch, cfg, val_meter):
+def eval_epoch(loader, model, cur_epoch, cfg, val_meter, logger):
     model.eval()
     val_meter.iter_tic()
 
@@ -298,7 +311,10 @@ def eval_epoch(loader, model, cur_epoch, cfg, val_meter):
                 else:
                     meta[key] = val.to(cfg.DEVICE)
             index = index.to(cfg.DEVICE)
-            time = time.to(cfg.DEVICE)
+            if cfg.DEVICE == "mps":
+                time = time.float().to(cfg.DEVICE)    
+            else:
+                time = time.to(cfg.DEVICE)
 
         batch_size = (
             inputs[0][0].size(0)
@@ -351,11 +367,11 @@ def eval_epoch(loader, model, cur_epoch, cfg, val_meter):
     top1_err = 100 - top1_acc
     top5_err = 100 - top5_acc
 
-    print("---------------------------------------------------------------------------")
-    print(f"Epoch {cur_epoch} Training Results:")
-    print(f"Top-1 Error: {top1_err:.2f}% | Top-5 Error: {top5_err:.2f}%")
-    print(f"Top-1 Accuracy: {top1_acc:.2f}% | Top-5 Accruacy: {top5_acc:.2f}%")
-    print("---------------------------------------------------------------------------")
+    logger("---------------------------------------------------------------------------")
+    logger(f"Epoch {cur_epoch} Training Results:")
+    logger(f"Top-1 Error: {top1_err:.2f}% | Top-5 Error: {top5_err:.2f}%")
+    logger(f"Top-1 Accuracy: {top1_acc:.2f}% | Top-5 Accruacy: {top5_acc:.2f}%")
+    logger("---------------------------------------------------------------------------")
 
     val_meter.log_epoch_stats(cur_epoch)
     val_meter.reset()
@@ -363,6 +379,11 @@ def eval_epoch(loader, model, cur_epoch, cfg, val_meter):
 
 def train():
     args = parse_args()
+    date = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+    output_path = "_".join([args.opts[args.opts.index("OUTPUT_DIR")+1], date])
+    args.opts[args.opts.index("OUTPUT_DIR")+1] = output_path
+
     for path_to_config in args.cfg_files:
         cfg = load_config(args, path_to_config)
         cfg = assert_and_infer_cfg(cfg)
@@ -383,60 +404,69 @@ def train():
         torch.backends.cudnn.deterministic=True
         torch.backends.cudnn.benchmark = False
 
-    print("\nCONFIGS=============================================================")
-    print("MULTIGRID.SHORT_CYCLE", cfg.MULTIGRID.SHORT_CYCLE)
-    print("MULTIGRID.LONG_CYCLE", cfg.MULTIGRID.LONG_CYCLE)
-    print("BN.NORM_TYPE", cfg.BN.NORM_TYPE)
-    print("NUM_GPUS", cfg.NUM_GPUS)
-    print("TRAIN.CUSTOM_LOAD", cfg.TRAIN.CUSTOM_LOAD)
-    print("SOLVER.LAYER_DECAY", cfg.SOLVER.LAYER_DECAY)
-    print("MODEL.FINETUNE_FACTOR", cfg.MODEL.FINETUNE_FACTOR)
-    print("MODEL.ADAPT_FINETUNE_FACTOR", cfg.MODEL.ADAPT_FINETUNE_FACTOR)
-    print("MODEL.DEFAULT_FINETUNE_FACTOR", cfg.MODEL.DEFAULT_FINETUNE_FACTOR)
-    print("MODEL.MLP_FINETUNE_FACTOR", cfg.MODEL.MLP_FINETUNE_FACTOR)
-    print("MODEL.EXPERT_FINETUNE_FACTOR", cfg.MODEL.EXPERT_FINETUNE_FACTOR)
-    print("SOLVER.OPTIMIZING_METHOD", cfg.SOLVER.OPTIMIZING_METHOD)
-    print("SOLVER.LARS_ON", cfg.SOLVER.LARS_ON)
-    print("TRAIN.MIXED_PRECISION", cfg.TRAIN.MIXED_PRECISION)
-    print("TRAIN.AUTO_RESUME", cfg.TRAIN.AUTO_RESUME)
-    print("DETECTION.ENABLE", cfg.DETECTION.ENABLE)
-    print("AUG.NUM_SAMPLE", cfg.AUG.NUM_SAMPLE)
-    print("DATA.TRAIN_CROP_NUM_TEMPORAL", cfg.DATA.TRAIN_CROP_NUM_TEMPORAL)
-    print("DATA.TRAIN_CROP_NUM_SPATIAL", cfg.DATA.TRAIN_CROP_NUM_SPATIAL)
-    print("MODEL.MODEL_NAME", cfg.MODEL.MODEL_NAME)
-    print("MIXUP.ENABLE", cfg.MIXUP.ENABLE)
-    print("BN.USE_PRECISE_STATS", cfg.BN.USE_PRECISE_STATS)
-    print("TASK", cfg.TASK)
-    print("CONTRASTIVE.KNN_ON", cfg.CONTRASTIVE.KNN_ON)
-    print("TENSORBOARD.ENABLE", cfg.TENSORBOARD.ENABLE)
-    print("NUM_SHARDS", cfg.NUM_SHARDS)
-    print("VAL_MODE", cfg.VAL_MODE)
-    print("TRAIN.EWC_SET", cfg.TRAIN.EWC_SET)
-    print("DATA.LOADER_CHUNK_SIZE", cfg.DATA.LOADER_CHUNK_SIZE)
-    print("TRAIN.ZS_CONS", cfg.TRAIN.ZS_CONS)
-    print("TRAIN.CLIP_ORI_PATH", cfg.TRAIN.CLIP_ORI_PATH)
-    print("MODEL.FROZEN_BN", cfg.MODEL.FROZEN_BN)
-    print("MODEL.LOSS_FUNC", cfg.MODEL.LOSS_FUNC)
-    print("TRAIN.LINEAR_CONNECT_CLIMB", cfg.TRAIN.LINEAR_CONNECT_CLIMB)
-    print("MODEL.KEEP_RAW_MODEL", cfg.MODEL.KEEP_RAW_MODEL)
-    print("MODEL.RAW_MODEL_DISTILLATION", cfg.MODEL.RAW_MODEL_DISTILLATION)
-    print("MASK.ENABLE", cfg.MASK.ENABLE)
-    print("MODEL.RECORD_ROUTING", cfg.MODEL.RECORD_ROUTING)
-    print("SOLVER.CLIP_GRAD_VAL", cfg.SOLVER.CLIP_GRAD_VAL)
-    print("SOLVER.CLIP_GRAD_L2NORM", cfg.SOLVER.CLIP_GRAD_L2NORM)
-    print("DATA.MULTI_LABEL", cfg.DATA.MULTI_LABEL)
-    print("DATA.IN22k_VAL_IN1K", cfg.DATA.IN22k_VAL_IN1K)
-    print("CONFIGS=============================================================\n")
+    cfg.OUTPUT_DIR = output_path
+    logger = Logger(os.path.join(cfg.OUTPUT_DIR, "log.txt"))
+
+    logger("\nCONFIGS=============================================================")
+    logger("MODEL.MODEL_NAME"+":"+ str(cfg.MODEL.MODEL_NAME))
+    # logger("MULTIGRID.SHORT_CYCLE"+":"+ str(cfg.MULTIGRID.SHORT_CYCLE))
+    # logger("MULTIGRID.LONG_CYCLE"+":"+ str(cfg.MULTIGRID.LONG_CYCLE))
+    # logger("BN.NORM_TYPE"+":"+ str(cfg.BN.NORM_TYPE))
+    # logger("NUM_GPUS"+":"+ str(cfg.NUM_GPUS))
+    # logger("TRAIN.CUSTOM_LOAD"+":"+ str(cfg.TRAIN.CUSTOM_LOAD))
+    # logger("SOLVER.LAYER_DECAY"+":"+ str(cfg.SOLVER.LAYER_DECAY))
+    # logger("MODEL.FINETUNE_FACTOR"+":"+ str(cfg.MODEL.FINETUNE_FACTOR))
+    # logger("MODEL.ADAPT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.ADAPT_FINETUNE_FACTOR))
+    # logger("MODEL.DEFAULT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.DEFAULT_FINETUNE_FACTOR))
+    # logger("MODEL.MLP_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.MLP_FINETUNE_FACTOR))
+    # logger("MODEL.EXPERT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.EXPERT_FINETUNE_FACTOR))
+    logger("SOLVER.OPTIMIZING_METHOD"+":"+ str(cfg.SOLVER.OPTIMIZING_METHOD))
+    # logger("SOLVER.LARS_ON"+":"+ str(cfg.SOLVER.LARS_ON))
+    logger("TRAIN.MIXED_PRECISION"+":"+ str(cfg.TRAIN.MIXED_PRECISION))
+    logger("TRAIN.AUTO_RESUME"+":"+ str(cfg.TRAIN.AUTO_RESUME))
+    # logger("DETECTION.ENABLE"+":"+ str(cfg.DETECTION.ENABLE))
+    logger("AUG.NUM_SAMPLE"+":"+ str(cfg.AUG.NUM_SAMPLE))
+    logger("DATA.TRAIN_CROP_NUM_TEMPORAL"+":"+ str(cfg.DATA.TRAIN_CROP_NUM_TEMPORAL))
+    logger("DATA.TRAIN_CROP_NUM_SPATIAL"+":"+ str(cfg.DATA.TRAIN_CROP_NUM_SPATIAL))
+    # logger("MIXUP.ENABLE"+":"+ str(cfg.MIXUP.ENABLE))
+    # logger("BN.USE_PRECISE_STATS"+":"+ str(cfg.BN.USE_PRECISE_STATS))
+    # logger("TASK"+":"+ str(cfg.TASK))
+    # logger("CONTRASTIVE.KNN_ON"+":"+ str(cfg.CONTRASTIVE.KNN_ON))
+    # logger("TENSORBOARD.ENABLE"+":"+ str(cfg.TENSORBOARD.ENABLE))
+    # logger("NUM_SHARDS"+":"+ str(cfg.NUM_SHARDS))
+    # logger("VAL_MODE"+":"+ str(cfg.VAL_MODE))
+    # logger("TRAIN.EWC_SET"+":"+ str(cfg.TRAIN.EWC_SET))
+    # logger("DATA.LOADER_CHUNK_SIZE"+":"+ str(cfg.DATA.LOADER_CHUNK_SIZE))
+    # logger("TRAIN.ZS_CONS"+":"+ str(cfg.TRAIN.ZS_CONS))
+    logger("TRAIN.CLIP_ORI_PATH"+":"+ str(cfg.TRAIN.CLIP_ORI_PATH))
+    # logger("MODEL.FROZEN_BN"+":"+ str(cfg.MODEL.FROZEN_BN))
+    logger("MODEL.LOSS_FUNC"+":"+ str(cfg.MODEL.LOSS_FUNC))
+    # logger("TRAIN.LINEAR_CONNECT_CLIMB"+":"+ str(cfg.TRAIN.LINEAR_CONNECT_CLIMB))
+    logger("MODEL.KEEP_RAW_MODEL"+":"+ str(cfg.MODEL.KEEP_RAW_MODEL))
+    logger("MODEL.RAW_MODEL_DISTILLATION"+":"+ str(cfg.MODEL.RAW_MODEL_DISTILLATION))
+    # logger("MASK.ENABLE"+":"+ str(cfg.MASK.ENABLE))
+    # logger("MODEL.RECORD_ROUTING"+":"+ str(cfg.MODEL.RECORD_ROUTING))
+    # logger("SOLVER.CLIP_GRAD_VAL"+":"+ str(cfg.SOLVER.CLIP_GRAD_VAL))
+    # logger("SOLVER.CLIP_GRAD_L2NORM"+":"+ str(cfg.SOLVER.CLIP_GRAD_L2NORM))
+    # logger("DATA.MULTI_LABEL"+":"+ str(cfg.DATA.MULTI_LABEL))
+    # logger("DATA.IN22k_VAL_IN1K"+":"+ str(cfg.DATA.IN22k_VAL_IN1K))
+    logger("CONFIGS=============================================================\n")
 
     model = TemporalClipVideo(cfg).to(cfg.DEVICE)
     optimizer = construct_optimizer(model, cfg)
     
-    scaler = torch.amp.GradScaler(cfg.DEVICE, enabled=cfg.TRAIN.MIXED_PRECISION)
+    scaler = None
+
+    if cfg.DEVICE == "mps":
+        scaler = torch.cuda.amp.GradScaler(enabled=cfg.TRAIN.MIXED_PRECISION)    
+    else:
+        scaler = torch.amp.GradScaler(cfg.DEVICE, enabled=cfg.TRAIN.MIXED_PRECISION)
+
     last_checkpoint = cu.get_last_checkpoint("./pretrained", task=cfg.TASK)
 
     start_epoch = 0
     if last_checkpoint is not None:
-        print("\nLoading pretrained model==========================================\n")
+        logger("\nLoading pretrained model==========================================\n")
         checkpoint_epoch = cu.load_checkpoint(
             last_checkpoint,
             model,
@@ -453,25 +483,26 @@ def train():
     raw_mixup = cfg.MIXUP.ENABLE
     cfg.TRAIN.BATCH_SIZE = cfg.TRAIN.BATCH_SIZE // 2
     cfg.MIXUP.ENABLE = False
-    fisher_loader = construct_loader(cfg, "train")
     cfg.TRAIN.BATCH_SIZE = raw_batch_size
     cfg.MIXUP.ENABLE = raw_mixup
 
-    print("DATASET SIZE TRAIN", len(train_loader)*cfg.TRAIN.BATCH_SIZE)
-    print("DATASET SIZE VAL", len(val_loader)*cfg.TRAIN.BATCH_SIZE)
+    logger("DATASET SIZE TRAIN: " + str(len(train_loader)*cfg.TRAIN.BATCH_SIZE))
+    logger("DATASET SIZE VAL: " + str(len(val_loader)*cfg.TRAIN.BATCH_SIZE))
 
     train_meter = TrainMeter(len(train_loader), cfg)
     val_meter = ValMeter(len(val_loader), cfg)
-    # epoch_timer = EpochTimer()
+    epoch_timer = EpochTimer()
 
     for cur_epoch in range(start_epoch, cfg.SOLVER.MAX_EPOCH):
-        print(f"\nEpoch [{cur_epoch+1}/{cfg.SOLVER.MAX_EPOCH}]")
-        train_epoch(train_loader, model, optimizer, scaler, cur_epoch, cfg, train_meter)
+        epoch_timer.epoch_tic()
+
+        logger(f"\nEpoch [{cur_epoch+1}/{cfg.SOLVER.MAX_EPOCH}]")
+        train_epoch(train_loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, logger)
         
-        # epoch_timer.epoch_toc()
         _ = misc.aggregate_sub_bn_stats(model)
 
-        eval_epoch(val_loader, model, cur_epoch, cfg, val_meter)
+        eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
+        epoch_timer.epoch_toc()
 
         cu.save_checkpoint(
             cfg.OUTPUT_DIR,
@@ -481,12 +512,26 @@ def train():
             cfg,
             scaler if cfg.TRAIN.MIXED_PRECISION else None,
         )
-        print("==============================================================================\n\n")
+        logger("\n")
 
-    print("TOP1 ERR: ", val_meter.min_top1_err)
-    print("TOP5 ERR: ", val_meter.min_top5_err)
-    print("TOP1 ACC: ", 100 - val_meter.min_top1_err)
-    print("TOP5 ACC: ", 100 - val_meter.min_top5_err)
+        logger(
+            f"Epoch {cur_epoch} takes {epoch_timer.last_epoch_time():.2f}s. Epochs\n \
+            from {start_epoch} to {cur_epoch} take {epoch_timer.avg_epoch_time():.2f}s in average and\n \
+            {epoch_timer.median_epoch_time():.2f}s in median."
+        )
+
+        logger(
+            f"For epoch {cur_epoch}, each iteraction takes\n \
+            {epoch_timer.last_epoch_time()/len(train_loader):.2f}s in average\n \
+            From epoch {start_epoch} to {cur_epoch}, each iteraction takes\n \
+            {epoch_timer.avg_epoch_time()/len(train_loader):.2f}s in average."
+        )
+        logger("==============================================================================\n\n")
+
+    logger("TOP1 ERR: " + str(val_meter.min_top1_err))
+    logger("TOP5 ERR: " + str(val_meter.min_top5_err))
+    logger("TOP1 ACC: " + str(100 - val_meter.min_top1_err))
+    logger("TOP5 ACC: " + str(100 - val_meter.min_top5_err))
         
 
 if __name__ == '__main__':
