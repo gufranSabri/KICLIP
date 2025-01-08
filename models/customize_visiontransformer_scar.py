@@ -6,6 +6,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
 from clip.model import LayerNorm, QuickGELU
 from models.torch_utils import activation
+from models.scar_lstm import SCAR_LSTM
 
 # TYPE 1: expand temporal attention view
 class TimesAttentionBlock(nn.Module):
@@ -164,18 +165,6 @@ class TSTransformer(nn.Module):
             self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask, num_experts, record_routing, routing_type) if layer_id in expert_insert_layers else ResidualAttentionBlock(width, heads, attn_mask, record_routing=record_routing, routing_type=routing_type) for layer_id in range(layers)])
         elif self.temporal_modeling_type == 'expand_temporal_view':
             self.resblocks = nn.Sequential(*[TimesAttentionBlock(width, heads, attn_mask, T=T, temporal_modeling_type=self.temporal_modeling_type) for _ in range(layers)])
-        elif self.temporal_modeling_type == 'first_half_lstm':
-            pass
-        elif self.temporal_modeling_type == 'first_half_xlstm':
-            pass
-        elif self.temporal_modeling_type == 'second_half_lstm':
-            pass
-        elif self.temporal_modeling_type == 'second_half_xlstm':
-            pass
-        elif self.temporal_modeling_type == 'full_lstm':
-            pass
-        elif self.temporal_modeling_type == 'full_xlstm':
-            pass
 
     def forward(self, x, prompt_token=None):
         if not self.use_checkpoint:
@@ -200,7 +189,7 @@ class TSTransformer(nn.Module):
 
 # TYPE
 class TemporalVisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level'):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level', vil=False):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
@@ -222,12 +211,31 @@ class TemporalVisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
+        self.tuned_model = False
+        self.vil = vil
+
+    def construct_scar_components(self):
+        if self.vil:
+            self.vil = torch.hub.load("nx-ai/vision-lstm", "vil2-base")
+            self.vil.patch_embed = torch.nn.Identity()
+            self.vil.pos_embed = torch.nn.Identity()
+            self.vil.head = torch.nn.Linear(1536, 768)
+        
+        self.lstm = SCAR_LSTM(768, 512, 2)
+
+        self.tuned_model = True
+        
     def forward(self, x):
         x, [maskf, mask] = x
         x = self.conv1(x) #[b*T, 768, 14, 14]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # [b*T, 768, 196]
         x = x.permute(0, 2, 1).contiguous()  # [b*T, 196, 768]
 
+        # ViL encoder
+        if self.vil:
+            vil_x = self.vil(x)
+
+        # TSTransformer
         cls_token = self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device) #[b*T, 1, 768]
         x = torch.cat([cls_token, x], dim=1)  # [b*T, 197, 768]
         x = x + self.positional_embedding.to(x.dtype) #[b*T, 197, 768]
@@ -235,11 +243,24 @@ class TemporalVisionTransformer(nn.Module):
 
         x = x.permute(1, 0, 2)  # [197, b*T, 768]
         x = self.transformer(x) # [197, b*T, 768]
-        feature = x.permute(1, 0, 2)  # [b*T, 197, 768]
+        ts_x = x.permute(1, 0, 2)  # [b*T, 197, 768]
 
-        x = self.ln_post(feature[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
+        # # SCAR LSTM
+        if self.tuned_model:
+            lstm_x = ts_x.reshape(ts_x.shape[0]//self.T, self.T, ts_x.shape[1], ts_x.shape[-1])
+            lstm_x = self.lstm(lstm_x)
+            lstm_x = lstm_x.reshape(lstm_x.shape[0]*lstm_x.shape[1], -1)
+
+        ts_x = self.ln_post(ts_x[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
+
+        if self.vil:
+            x = (ts_x + vil_x + lstm_x) / 3
+        elif self.tuned_model:
+            x = (ts_x + lstm_x) / 2
+        else:
+            x = ts_x
 
         if self.proj is not None:
             x = x @ self.proj #[b*T, num_classes]
         
-        return [x, feature]
+        return [x, ts_x]

@@ -1,7 +1,7 @@
 ROOT=./
-CKPT=./basetraining/B2N_hmdb51_froster
-OUT_DIR=./basetraining/B2N_hmdb51_froster/testing
-LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_froster/wa_checkpoints/swa_2_22.pth
+CKPT=./basetraining/B2N_hmdb51_froster_2025-01-08_16-13-08
+OUT_DIR=./basetraining/B2N_hmdb51_froster_2025-01-08_16-13-08/testing
+LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_froster_2025-01-08_16-13-08/wa_checkpoints/swa_2_22.pth
 
 # TEST_FILE can be set as val.csv (base set) or test.csv (novel set).
 # rephrased_file can be set as train_rephrased.json (base set) or test_rephrased.json (novel set)
@@ -42,7 +42,7 @@ python -W ignore -u test_b2n.py \
 
 TRAIN_FILE=train.csv
 VAL_FILE=val.csv
-TEST_FILE=val.csv
+TEST_FILE=val_test.csv
 rephrased_file=train_rephrased.json
 NUM_CLASSES=26
 

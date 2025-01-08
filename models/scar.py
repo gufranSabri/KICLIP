@@ -12,11 +12,11 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from clip.model import CLIP,LayerNorm,Transformer
 from clip.clip import _MODELS, _download, tokenize
-from models.customize_visiontransformer import TemporalVisionTransformer
+from models.customize_visiontransformer_scar import TemporalVisionTransformer
 
-class TemporalClipVideo(nn.Module):
+class SCAR(nn.Module):
     def __init__(self, cfg):
-        super(TemporalClipVideo, self).__init__()
+        super(SCAR, self).__init__()
         
         self.device = cfg.DEVICE
         self.cfg = cfg
@@ -107,7 +107,8 @@ class TemporalClipVideo(nn.Module):
             num_experts=cfg.MODEL.NUM_EXPERTS, 
             expert_insert_layers=cfg.MODEL.EXPERT_INSERT_LAYERS,
             record_routing=cfg.MODEL.RECORD_ROUTING, 
-            routing_type=cfg.MODEL.ROUTING_TYPE
+            routing_type=cfg.MODEL.ROUTING_TYPE,
+            vil=cfg.MODEL.VIL
         )
         if cfg.MODEL.KEEP_RAW_MODEL:   
             self.raw_model, self.preprocess = load("ViT-B/16", jit=False, 
@@ -123,7 +124,7 @@ class TemporalClipVideo(nn.Module):
             for _, p in self.raw_model.named_parameters():
                 p.requires_grad = False
 
-        
+        self.model.visual.construct_scar_components()
 
         self.model.float() 
         if cfg.MODEL.KEEP_RAW_MODEL:
@@ -318,7 +319,8 @@ class WCLIP(CLIP):
         num_experts=0,
         expert_insert_layers=[],
         record_routing=False,
-        routing_type = 'patch-level'
+        routing_type = 'patch-level',
+        vil = False
     ):
         super().__init__(
                 embed_dim,
@@ -342,6 +344,7 @@ class WCLIP(CLIP):
             expert_insert_layers=expert_insert_layers,
             record_routing = record_routing,
             routing_type = routing_type,
+            vil = vil
         )
 
         self.transformer = Transformer(
@@ -410,7 +413,8 @@ def build_model(
         num_experts=0, 
         expert_insert_layers=[], 
         record_routing=False, 
-        routing_type='patch-level'
+        routing_type='patch-level',
+        vil = False
     ):
 
     if "visual.proj" in state_dict:
@@ -443,6 +447,7 @@ def build_model(
         expert_insert_layers=expert_insert_layers,
         record_routing=record_routing,
         routing_type=routing_type,
+        vil=vil
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
@@ -487,7 +492,8 @@ def load(name: str,
         num_experts=0, 
         expert_insert_layers=[], 
         record_routing=False, 
-        routing_type='patch-level'
+        routing_type='patch-level',
+        vil = False
     ):
     
     if name in _MODELS:
@@ -510,7 +516,7 @@ def load(name: str,
         T=T, temporal_modeling_type=temporal_modeling_type, 
         use_checkpoint=use_checkpoint, context_length = context_length,
         num_experts=num_experts, expert_insert_layers=expert_insert_layers,
-        record_routing=record_routing, routing_type=routing_type
+        record_routing=record_routing, routing_type=routing_type, vil=vil
     ).to(device)
 
     return model, _transform(model.visual.input_resolution)

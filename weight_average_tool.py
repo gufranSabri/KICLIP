@@ -4,8 +4,8 @@ import os
 raw_clip = '/Users/gufran/.cache/clip/ViT-B-16.pt'
 # source_dir = '/DDN_ROOT/ytcheng/code/patching_checkpoint/basetraining/temporalclip_vitb16_8x16_interpolation_bugfix_0.5ratio_rand0.0_0.6sample_seed2/checkpoints'
 # output_dir = '/DDN_ROOT/ytcheng/code/patching_checkpoint/basetraining/temporalclip_vitb16_8x16_interpolation_bugfix_0.5ratio_rand0.0_0.6sample_seed2/wa_checkpoints'
-source_dir = './basetraining/B2N_hmdb51_froster_2025-01-08_13-28-15/checkpoints'
-output_dir = './basetraining/B2N_hmdb51_froster_2025-01-08_13-28-15/wa_checkpoints'
+source_dir = './basetraining/B2N_hmdb51_froster_2025-01-08_16-13-08/checkpoints'
+output_dir = './basetraining/B2N_hmdb51_froster_2025-01-08_16-13-08/wa_checkpoints'
 
 wa_start = 2
 wa_end = 22

@@ -10,7 +10,7 @@ TEST_FILE=test.csv
 cd $ROOT
 
 python train_b2n.py \
-    --cfg ./config_files/Kinetics/TemporalCLIP_vitb16_8x16_STAdapter_HMDB51.yaml \
+    --cfg ./config_files/Kinetics/SCAR_vitb16_8x16_STAdapter_HMDB51.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_hmdb \
     DATA.PATH_PREFIX ./data/hmdb51/videos \
     TRAIN_FILE $TRAIN_FILE \
@@ -19,7 +19,7 @@ python train_b2n.py \
     DATA.PATH_LABEL_SEPARATOR , \
     DATA.INDEX_LABEL_MAPPING_FILE ./zs_label_db/B2N_hmdb/train_rephrased.json \
     TRAIN.ENABLE True \
-    OUTPUT_DIR $CKPT/basetraining/B2N_hmdb51_froster \
+    OUTPUT_DIR $CKPT/basetraining/B2N_hmdb51_scar \
     TRAIN.BATCH_SIZE 4 \
     TEST.BATCH_SIZE 4 \
     TEST.NUM_ENSEMBLE_VIEWS 3 \
