@@ -71,7 +71,7 @@ def construct_optimizer(model, cfg):
         },
     ]
     optim_params = [x for x in optim_params if len(x["params"])]
-    
+
     return torch.optim.AdamW(
         optim_params,
         lr=cfg.SOLVER.BASE_LR,
@@ -163,9 +163,7 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
         optim.set_lr(optimizer, lr)
         train_meter.data_toc()
 
-        optimizer.zero_grad()
-
-        perform_backward = True
+        # optimizer.zero_grad()
         if cfg.DEVICE == 'mps':
             with torch.cuda.amp.autocast(enabled=cfg.TRAIN.MIXED_PRECISION):
                 optimizer.zero_grad()
@@ -201,8 +199,7 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
             loss, loss_extra = loss
 
         misc.check_nan_losses(loss)
-        if perform_backward:
-            scaler.scale(loss).backward()
+        scaler.scale(loss).backward()
 
         scaler.unscale_(optimizer)
 
@@ -282,7 +279,7 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
     epoch_top5_acc = 100.0 - epoch_top5_err
 
     logger("---------------------------------------------------------------------------")
-    logger(f"Epoch {cur_epoch} Training Results:")
+    logger(f"Epoch {cur_epoch+1} Training Results:")
     logger(f"Top-1 Error: {epoch_top1_err:.2f}% | Top-5 Error: {epoch_top5_err:.2f}%")
     logger(f"Top-1 Accuracy: {epoch_top1_acc:.2f}% | Top-5 Accruacy: {epoch_top5_acc:.2f}%")
     logger("---------------------------------------------------------------------------")
@@ -368,7 +365,7 @@ def eval_epoch(loader, model, cur_epoch, cfg, val_meter, logger):
     top5_err = 100 - top5_acc
 
     logger("---------------------------------------------------------------------------")
-    logger(f"Epoch {cur_epoch} Training Results:")
+    logger(f"Epoch {cur_epoch+1} Training Results:")
     logger(f"Top-1 Error: {top1_err:.2f}% | Top-5 Error: {top5_err:.2f}%")
     logger(f"Top-1 Accuracy: {top1_acc:.2f}% | Top-5 Accruacy: {top5_acc:.2f}%")
     logger("---------------------------------------------------------------------------")
@@ -409,62 +406,62 @@ def train():
 
     logger("\nCONFIGS=============================================================")
     logger("MODEL.MODEL_NAME"+":"+ str(cfg.MODEL.MODEL_NAME))
-    # logger("MULTIGRID.SHORT_CYCLE"+":"+ str(cfg.MULTIGRID.SHORT_CYCLE))
-    # logger("MULTIGRID.LONG_CYCLE"+":"+ str(cfg.MULTIGRID.LONG_CYCLE))
-    # logger("BN.NORM_TYPE"+":"+ str(cfg.BN.NORM_TYPE))
-    # logger("NUM_GPUS"+":"+ str(cfg.NUM_GPUS))
-    # logger("TRAIN.CUSTOM_LOAD"+":"+ str(cfg.TRAIN.CUSTOM_LOAD))
-    # logger("SOLVER.LAYER_DECAY"+":"+ str(cfg.SOLVER.LAYER_DECAY))
-    # logger("MODEL.FINETUNE_FACTOR"+":"+ str(cfg.MODEL.FINETUNE_FACTOR))
-    # logger("MODEL.ADAPT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.ADAPT_FINETUNE_FACTOR))
-    # logger("MODEL.DEFAULT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.DEFAULT_FINETUNE_FACTOR))
-    # logger("MODEL.MLP_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.MLP_FINETUNE_FACTOR))
-    # logger("MODEL.EXPERT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.EXPERT_FINETUNE_FACTOR))
+    logger("MODEL.TEMPORAL_MODELING_TYPE"+":"+ str(cfg.MODEL.TEMPORAL_MODELING_TYPE))
+    logger("AUG.NUM_SAMPLE"+":"+ str(cfg.AUG.NUM_SAMPLE))
+    logger("MULTIGRID.SHORT_CYCLE"+":"+ str(cfg.MULTIGRID.SHORT_CYCLE))
+    logger("MULTIGRID.LONG_CYCLE"+":"+ str(cfg.MULTIGRID.LONG_CYCLE))
+    logger("BN.NORM_TYPE"+":"+ str(cfg.BN.NORM_TYPE))
+    logger("NUM_GPUS"+":"+ str(cfg.NUM_GPUS))
+    logger("TRAIN.CUSTOM_LOAD"+":"+ str(cfg.TRAIN.CUSTOM_LOAD))
+    logger("SOLVER.LAYER_DECAY"+":"+ str(cfg.SOLVER.LAYER_DECAY))
+    logger("MODEL.FINETUNE_FACTOR"+":"+ str(cfg.MODEL.FINETUNE_FACTOR))
+    logger("MODEL.ADAPT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.ADAPT_FINETUNE_FACTOR))
+    logger("MODEL.DEFAULT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.DEFAULT_FINETUNE_FACTOR))
+    logger("MODEL.MLP_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.MLP_FINETUNE_FACTOR))
+    logger("MODEL.EXPERT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.EXPERT_FINETUNE_FACTOR))
     logger("SOLVER.OPTIMIZING_METHOD"+":"+ str(cfg.SOLVER.OPTIMIZING_METHOD))
-    # logger("SOLVER.LARS_ON"+":"+ str(cfg.SOLVER.LARS_ON))
+    logger("SOLVER.LARS_ON"+":"+ str(cfg.SOLVER.LARS_ON))
     logger("TRAIN.MIXED_PRECISION"+":"+ str(cfg.TRAIN.MIXED_PRECISION))
     logger("TRAIN.AUTO_RESUME"+":"+ str(cfg.TRAIN.AUTO_RESUME))
-    # logger("DETECTION.ENABLE"+":"+ str(cfg.DETECTION.ENABLE))
-    logger("AUG.NUM_SAMPLE"+":"+ str(cfg.AUG.NUM_SAMPLE))
+    logger("DETECTION.ENABLE"+":"+ str(cfg.DETECTION.ENABLE))
     logger("DATA.TRAIN_CROP_NUM_TEMPORAL"+":"+ str(cfg.DATA.TRAIN_CROP_NUM_TEMPORAL))
     logger("DATA.TRAIN_CROP_NUM_SPATIAL"+":"+ str(cfg.DATA.TRAIN_CROP_NUM_SPATIAL))
-    # logger("MIXUP.ENABLE"+":"+ str(cfg.MIXUP.ENABLE))
-    # logger("BN.USE_PRECISE_STATS"+":"+ str(cfg.BN.USE_PRECISE_STATS))
-    # logger("TASK"+":"+ str(cfg.TASK))
-    # logger("CONTRASTIVE.KNN_ON"+":"+ str(cfg.CONTRASTIVE.KNN_ON))
-    # logger("TENSORBOARD.ENABLE"+":"+ str(cfg.TENSORBOARD.ENABLE))
-    # logger("NUM_SHARDS"+":"+ str(cfg.NUM_SHARDS))
-    # logger("VAL_MODE"+":"+ str(cfg.VAL_MODE))
-    # logger("TRAIN.EWC_SET"+":"+ str(cfg.TRAIN.EWC_SET))
-    # logger("DATA.LOADER_CHUNK_SIZE"+":"+ str(cfg.DATA.LOADER_CHUNK_SIZE))
-    # logger("TRAIN.ZS_CONS"+":"+ str(cfg.TRAIN.ZS_CONS))
+    logger("MIXUP.ENABLE"+":"+ str(cfg.MIXUP.ENABLE))
+    logger("BN.USE_PRECISE_STATS"+":"+ str(cfg.BN.USE_PRECISE_STATS))
+    logger("TASK"+":"+ str(cfg.TASK))
+    logger("CONTRASTIVE.KNN_ON"+":"+ str(cfg.CONTRASTIVE.KNN_ON))
+    logger("TENSORBOARD.ENABLE"+":"+ str(cfg.TENSORBOARD.ENABLE))
+    logger("NUM_SHARDS"+":"+ str(cfg.NUM_SHARDS))
+    logger("VAL_MODE"+":"+ str(cfg.VAL_MODE))
+    logger("TRAIN.EWC_SET"+":"+ str(cfg.TRAIN.EWC_SET))
+    logger("DATA.LOADER_CHUNK_SIZE"+":"+ str(cfg.DATA.LOADER_CHUNK_SIZE))
+    logger("TRAIN.ZS_CONS"+":"+ str(cfg.TRAIN.ZS_CONS))
     logger("TRAIN.CLIP_ORI_PATH"+":"+ str(cfg.TRAIN.CLIP_ORI_PATH))
-    # logger("MODEL.FROZEN_BN"+":"+ str(cfg.MODEL.FROZEN_BN))
+    logger("MODEL.FROZEN_BN"+":"+ str(cfg.MODEL.FROZEN_BN))
     logger("MODEL.LOSS_FUNC"+":"+ str(cfg.MODEL.LOSS_FUNC))
-    # logger("TRAIN.LINEAR_CONNECT_CLIMB"+":"+ str(cfg.TRAIN.LINEAR_CONNECT_CLIMB))
+    logger("TRAIN.LINEAR_CONNECT_CLIMB"+":"+ str(cfg.TRAIN.LINEAR_CONNECT_CLIMB))
     logger("MODEL.KEEP_RAW_MODEL"+":"+ str(cfg.MODEL.KEEP_RAW_MODEL))
     logger("MODEL.RAW_MODEL_DISTILLATION"+":"+ str(cfg.MODEL.RAW_MODEL_DISTILLATION))
-    # logger("MASK.ENABLE"+":"+ str(cfg.MASK.ENABLE))
-    # logger("MODEL.RECORD_ROUTING"+":"+ str(cfg.MODEL.RECORD_ROUTING))
-    # logger("SOLVER.CLIP_GRAD_VAL"+":"+ str(cfg.SOLVER.CLIP_GRAD_VAL))
-    # logger("SOLVER.CLIP_GRAD_L2NORM"+":"+ str(cfg.SOLVER.CLIP_GRAD_L2NORM))
-    # logger("DATA.MULTI_LABEL"+":"+ str(cfg.DATA.MULTI_LABEL))
-    # logger("DATA.IN22k_VAL_IN1K"+":"+ str(cfg.DATA.IN22k_VAL_IN1K))
+    logger("MASK.ENABLE"+":"+ str(cfg.MASK.ENABLE))
+    logger("MODEL.RECORD_ROUTING"+":"+ str(cfg.MODEL.RECORD_ROUTING))
+    logger("SOLVER.CLIP_GRAD_VAL"+":"+ str(cfg.SOLVER.CLIP_GRAD_VAL))
+    logger("SOLVER.CLIP_GRAD_L2NORM"+":"+ str(cfg.SOLVER.CLIP_GRAD_L2NORM))
+    logger("DATA.MULTI_LABEL"+":"+ str(cfg.DATA.MULTI_LABEL))
+    logger("DATA.IN22k_VAL_IN1K"+":"+ str(cfg.DATA.IN22k_VAL_IN1K))
+    logger("MODEL.FP16_ALLREDUCE"+":"+ str(cfg.MODEL.FP16_ALLREDUCE))
     logger("CONFIGS=============================================================\n")
 
     model = TemporalClipVideo(cfg).to(cfg.DEVICE)
     optimizer = construct_optimizer(model, cfg)
-    
-    scaler = None
 
+    scaler = None
     if cfg.DEVICE == "mps":
         scaler = torch.cuda.amp.GradScaler(enabled=cfg.TRAIN.MIXED_PRECISION)    
     else:
         scaler = torch.amp.GradScaler(cfg.DEVICE, enabled=cfg.TRAIN.MIXED_PRECISION)
 
-    last_checkpoint = cu.get_last_checkpoint("./pretrained", task=cfg.TASK)
-
     start_epoch = 0
+    last_checkpoint = cu.get_last_checkpoint("./pretrained", task=cfg.TASK)
     if last_checkpoint is not None:
         logger("\nLoading pretrained model==========================================\n")
         checkpoint_epoch = cu.load_checkpoint(
@@ -478,13 +475,6 @@ def train():
 
     train_loader = construct_loader(cfg, "train")
     val_loader = construct_loader(cfg, "val")
-
-    raw_batch_size = cfg.TRAIN.BATCH_SIZE
-    raw_mixup = cfg.MIXUP.ENABLE
-    cfg.TRAIN.BATCH_SIZE = cfg.TRAIN.BATCH_SIZE // 2
-    cfg.MIXUP.ENABLE = False
-    cfg.TRAIN.BATCH_SIZE = raw_batch_size
-    cfg.MIXUP.ENABLE = raw_mixup
 
     logger("DATASET SIZE TRAIN: " + str(len(train_loader)*cfg.TRAIN.BATCH_SIZE))
     logger("DATASET SIZE VAL: " + str(len(val_loader)*cfg.TRAIN.BATCH_SIZE))
@@ -501,7 +491,7 @@ def train():
         
         _ = misc.aggregate_sub_bn_stats(model)
 
-        eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
+        # eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
         epoch_timer.epoch_toc()
 
         cu.save_checkpoint(
@@ -515,15 +505,15 @@ def train():
         logger("\n")
 
         logger(
-            f"Epoch {cur_epoch} takes {epoch_timer.last_epoch_time():.2f}s. Epochs\n \
-            from {start_epoch} to {cur_epoch} take {epoch_timer.avg_epoch_time():.2f}s in average and\n \
+            f"Epoch {cur_epoch+1} takes {epoch_timer.last_epoch_time():.2f}s. Epochs\n \
+            from {start_epoch+1} to {cur_epoch+1} take {epoch_timer.avg_epoch_time():.2f}s in average and\n \
             {epoch_timer.median_epoch_time():.2f}s in median."
         )
 
         logger(
-            f"For epoch {cur_epoch}, each iteraction takes\n \
+            f"For epoch {cur_epoch+1}, each iteraction takes\n \
             {epoch_timer.last_epoch_time()/len(train_loader):.2f}s in average\n \
-            From epoch {start_epoch} to {cur_epoch}, each iteraction takes\n \
+            From epoch {start_epoch+1} to {cur_epoch+1}, each iteraction takes\n \
             {epoch_timer.avg_epoch_time()/len(train_loader):.2f}s in average."
         )
         logger("==============================================================================\n\n")

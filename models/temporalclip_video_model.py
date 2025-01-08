@@ -12,7 +12,7 @@ from torchvision.transforms import InterpolationMode
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from clip.model import CLIP,LayerNorm,Transformer
 from clip.clip import _MODELS, _download, tokenize
-from models.customize_visiontransformer import TemporalVisionTransformer
+from models.customize_visiontransformer import TemporalVisionEncoder
 
 class TemporalClipVideo(nn.Module):
     def __init__(self, cfg):
@@ -20,8 +20,8 @@ class TemporalClipVideo(nn.Module):
         
         self.device = cfg.DEVICE
         self.cfg = cfg
-        self._construct_network(cfg)
         self.num_pathways = 1
+        self._construct_network(cfg)
 
         self.model.eval()
 
@@ -57,14 +57,6 @@ class TemporalClipVideo(nn.Module):
         nn.init.zeros_(self.projector_t[2].weight)
         nn.init.kaiming_normal_(self.projector_t[0].weight)
 
-        if self.distillation and (not self.keep_raw_model):
-            print("Distillation is not supported if raw model is not kept")
-            exit()
-
-        if (self.keep_raw_model and self.ensemble_pred) and self.record_routing:
-            print("ensemble pred cannot not exist together with record-routing")
-            exit()
-        
         if self.tune_head:
             self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
             self.head = torch.nn.Parameter(self.dynamic_classifier, requires_grad=True)
@@ -134,9 +126,9 @@ class TemporalClipVideo(nn.Module):
         else:
             raise NotImplementedError
 
-        self.model.float() 
-        if cfg.MODEL.KEEP_RAW_MODEL:
-            self.raw_model.float()
+        # self.model.float() 
+        # if cfg.MODEL.KEEP_RAW_MODEL:
+        #     self.raw_model.float()
 
     def update_state(self):
         self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
@@ -204,6 +196,7 @@ class TemporalClipVideo(nn.Module):
             return pred
         
         else:
+            print("===========================================================================LMASDNFIAD SADASODI=========")
             img_encode /= img_encode.norm(dim=-1, keepdim=True)
 
             if self.tune_head:
@@ -231,8 +224,6 @@ class TemporalClipVideo(nn.Module):
                         
             if self.keep_raw_model and (self.ensemble_pred or self.distillation):
                 return [pred, None], [None, None]
-
-            
             
             return pred
     
@@ -339,7 +330,7 @@ class WCLIP(CLIP):
         
         self.vision_width = vision_width
         vision_heads = vision_width // 64
-        self.visual = TemporalVisionTransformer( # model.img_encode()
+        self.visual = TemporalVisionEncoder( # model.img_encode()
             input_resolution=image_resolution,
             patch_size=vision_patch_size,
             width=vision_width,
@@ -394,6 +385,7 @@ class WCLIP(CLIP):
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
+        # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
@@ -423,9 +415,7 @@ def build_model(
         routing_type='patch-level'
     ):
 
-    vit = "visual.proj" in state_dict
-
-    if vit:
+    if "visual.proj" in state_dict:
         vision_width = state_dict["visual.conv1.weight"].shape[0]
         vision_layers = len([k for k in state_dict.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
         vision_patch_size = state_dict["visual.conv1.weight"].shape[-1]
@@ -471,6 +461,9 @@ def build_model(
                         new_key = key.replace('mlp', 'experts_tail.%d'%expert_id)
                     state_dict[new_key] = state_dict[key]
     
+    msg = model.load_state_dict(state_dict,strict=False)
+    print("load pretrained CLIP:{}".format(msg))
+
     return model.eval()
 
 def _convert_image_to_rgb(image):
@@ -514,17 +507,12 @@ def load(name: str,
             warnings.warn(f"File {model_path} is not a JIT archive. Loading as a state dict instead")
             jit = False
         state_dict = torch.load(model_path, map_location="cpu")
-     
-    model = build_model(
-        state_dict or model.state_dict(), 
-        T=T, 
-        temporal_modeling_type=temporal_modeling_type, 
-        use_checkpoint=use_checkpoint, 
-        context_length = context_length,
-        num_experts=num_experts, 
-        expert_insert_layers=expert_insert_layers,
-        record_routing=record_routing, 
-        routing_type=routing_type
+
+    model = build_model(state_dict or model.state_dict(), 
+        T=T, temporal_modeling_type=temporal_modeling_type, 
+        use_checkpoint=use_checkpoint, context_length = context_length,
+        num_experts=num_experts, expert_insert_layers=expert_insert_layers,
+        record_routing=record_routing, routing_type=routing_type
     ).to(device)
 
     return model, _transform(model.visual.input_resolution)

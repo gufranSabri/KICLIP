@@ -147,7 +147,7 @@ class Transformer(nn.Module):
         return self.resblocks(x)
 
 # TYPE
-class TSTransformer(nn.Module):
+class TemporalProcessingUnit(nn.Module):
     def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, use_checkpoint=False, T=8, temporal_modeling_type=None, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level'):
         super().__init__()
         self.use_checkpoint = use_checkpoint
@@ -162,8 +162,20 @@ class TSTransformer(nn.Module):
         # 12 layers of TimesAttentionBlock
         if self.temporal_modeling_type == None:
             self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask, num_experts, record_routing, routing_type) if layer_id in expert_insert_layers else ResidualAttentionBlock(width, heads, attn_mask, record_routing=record_routing, routing_type=routing_type) for layer_id in range(layers)])
-        elif self.temporal_modeling_type == 'expand_temporal_view' or self.temporal_modeling_type == 'expand_temporal_view_step2' or self.temporal_modeling_type == 'expand_temporal_view_step3':
+        elif self.temporal_modeling_type == 'expand_temporal_view':
             self.resblocks = nn.Sequential(*[TimesAttentionBlock(width, heads, attn_mask, T=T, temporal_modeling_type=self.temporal_modeling_type) for _ in range(layers)])
+        elif self.temporal_modeling_type == 'first_half_lstm':
+            pass
+        elif self.temporal_modeling_type == 'first_half_xlstm':
+            pass
+        elif self.temporal_modeling_type == 'second_half_lstm':
+            pass
+        elif self.temporal_modeling_type == 'second_half_xlstm':
+            pass
+        elif self.temporal_modeling_type == 'full_lstm':
+            pass
+        elif self.temporal_modeling_type == 'full_xlstm':
+            pass
 
     def forward(self, x, prompt_token=None):
         if not self.use_checkpoint:
@@ -187,7 +199,7 @@ class TSTransformer(nn.Module):
             return checkpoint_sequential(self.resblocks, 3, x)
 
 # TYPE
-class TemporalVisionTransformer(nn.Module):
+class TemporalVisionEncoder(nn.Module):
     def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level'):
         super().__init__()
         self.input_resolution = input_resolution
@@ -205,7 +217,7 @@ class TemporalVisionTransformer(nn.Module):
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = TSTransformer(width, layers, heads, use_checkpoint=self.use_checkpoint, T=self.T, temporal_modeling_type=self.temporal_modeling_type, num_experts=num_experts, expert_insert_layers=expert_insert_layers, record_routing=record_routing, routing_type=routing_type)
+        self.transformer = TemporalProcessingUnit(width, layers, heads, use_checkpoint=self.use_checkpoint, T=self.T, temporal_modeling_type=self.temporal_modeling_type, num_experts=num_experts, expert_insert_layers=expert_insert_layers, record_routing=record_routing, routing_type=routing_type)
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
@@ -224,12 +236,7 @@ class TemporalVisionTransformer(nn.Module):
         x = self.ln_pre(x) #[b*T, 197, 768]
 
         x = x.permute(1, 0, 2)  # [197, b*T, 768]
-        
-        if self.record_routing:
-            x, routing_state = self.transformer(x)
-        else:
-            x = self.transformer(x) #[197, b*T, 768]
-        
+        x = self.transformer(x) # [197, b*T, 768]
         feature = x.permute(1, 0, 2)  # [b*T, 197, 768]
 
         x = self.ln_post(feature[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
@@ -237,7 +244,4 @@ class TemporalVisionTransformer(nn.Module):
         if self.proj is not None:
             x = x @ self.proj #[b*T, num_classes]
         
-        # if self.record_routing:
-        #     return [x, feature], routing_state
-        # else:
         return [x, feature]
