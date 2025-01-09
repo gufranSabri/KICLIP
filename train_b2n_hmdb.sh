@@ -20,7 +20,7 @@ python train_b2n.py \
     DATA.INDEX_LABEL_MAPPING_FILE ./zs_label_db/B2N_hmdb/train_rephrased.json \
     TRAIN.ENABLE True \
     OUTPUT_DIR $CKPT/basetraining/B2N_hmdb51_scar \
-    TRAIN.BATCH_SIZE 4 \
+    TRAIN.BATCH_SIZE 2 \
     TEST.BATCH_SIZE 4 \
     TEST.NUM_ENSEMBLE_VIEWS 3 \
     TEST.NUM_SPATIAL_CROPS 1 \

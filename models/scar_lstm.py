@@ -6,8 +6,8 @@ class SCAR_LSTM(nn.Module):
         super(SCAR_LSTM, self).__init__()
         
         self.down_projector = nn.Linear(768, hidden_size)
-        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
-        self.up_projector = nn.Linear(hidden_size, 768)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.up_projector = nn.Linear(hidden_size*2, 768)
 
         self.orig_dim = orig_dim
         

@@ -12,6 +12,8 @@ from utils.parser import load_config, parse_args
 import utils.checkpoint as cu
 from config.defaults import assert_and_infer_cfg
 from models.temporalclip_video_model import TemporalClipVideo
+from models.scar import SCAR
+from pprint import pprint
 
 
 def construct_loader(cfg, split="train"):
@@ -133,19 +135,28 @@ def test():
     for num_view in cfg.TEST.NUM_TEMPORAL_CLIPS:
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
-        model = TemporalClipVideo(cfg)
+
+        model = None
+        if cfg.MODEL.MODEL_NAME == "FROSTER":
+            model = TemporalClipVideo(cfg).to(cfg.DEVICE)
+        if cfg.MODEL.MODEL_NAME == "SCAR_VIL":
+            cfg.MODEL.VIL = True
+            model = SCAR(cfg).to(cfg.DEVICE)
+        if cfg.MODEL.MODEL_NAME == "SCAR":
+            cfg.MODEL.VIL = False
+            model = SCAR(cfg).to(cfg.DEVICE)
+
 
         if not cfg.TEST.CUSTOM_LOAD:
             cu.load_test_checkpoint(cfg, model)
 
         if cfg.TEST.CUSTOM_LOAD:
-            # print(cfg.TEST.PATCHING_MODEL and cfg.TEST.CLIP_ORI_PATH)
-
             custom_load_file = cfg.TEST.CUSTOM_LOAD_FILE
 
             checkpoint = torch.load(custom_load_file, map_location='cpu')
             checkpoint_model = checkpoint['model_state']
             state_dict = model.state_dict()
+
 
             if 'module' in list(state_dict.keys())[0]:
                 new_checkpoint_model = {} 

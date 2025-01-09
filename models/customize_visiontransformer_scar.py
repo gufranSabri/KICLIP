@@ -189,7 +189,7 @@ class TSTransformer(nn.Module):
 
 # TYPE
 class TemporalVisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level', vil=False):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level', vil=False, lstm=False):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
@@ -212,17 +212,19 @@ class TemporalVisionTransformer(nn.Module):
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
         self.tuned_model = False
-        self.vil = vil
+        self.include_vil = vil
+        self.include_lstm = lstm
 
     def construct_scar_components(self):
-        if self.vil:
+        if self.include_vil:
             self.vil = torch.hub.load("nx-ai/vision-lstm", "vil2-base")
             self.vil.patch_embed = torch.nn.Identity()
             self.vil.pos_embed = torch.nn.Identity()
             self.vil.head = torch.nn.Linear(1536, 768)
-        
-        self.lstm = SCAR_LSTM(768, 512, 2)
 
+        if self.include_lstm:
+            self.lstm = SCAR_LSTM(768, 512, 2)
+        
         self.tuned_model = True
         
     def forward(self, x):
@@ -232,7 +234,7 @@ class TemporalVisionTransformer(nn.Module):
         x = x.permute(0, 2, 1).contiguous()  # [b*T, 196, 768]
 
         # ViL encoder
-        if self.vil:
+        if self.include_vil:
             vil_x = self.vil(x)
 
         # TSTransformer
@@ -246,17 +248,19 @@ class TemporalVisionTransformer(nn.Module):
         ts_x = x.permute(1, 0, 2)  # [b*T, 197, 768]
 
         # # SCAR LSTM
-        if self.tuned_model:
+        if self.include_lstm:
             lstm_x = ts_x.reshape(ts_x.shape[0]//self.T, self.T, ts_x.shape[1], ts_x.shape[-1])
             lstm_x = self.lstm(lstm_x)
             lstm_x = lstm_x.reshape(lstm_x.shape[0]*lstm_x.shape[1], -1)
 
         ts_x = self.ln_post(ts_x[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
 
-        if self.vil:
-            x = (ts_x + vil_x + lstm_x) / 3
-        elif self.tuned_model:
-            x = (ts_x + lstm_x) / 2
+        if self.include_vil and self.include_lstm:
+            x = (ts_x + vil_x + lstm_x)/3
+        elif self.include_vil:
+            x = (ts_x + vil_x)/2
+        elif self.include_lstm:
+            x = (ts_x + lstm_x)/2
         else:
             x = ts_x
 

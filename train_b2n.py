@@ -456,11 +456,17 @@ def train():
     model = None
     if cfg.MODEL.MODEL_NAME == "FROSTER":
         model = TemporalClipVideo(cfg).to(cfg.DEVICE)
-    if cfg.MODEL.MODEL_NAME == "SCAR_VIL":
-        cfg.MODEL.VIL = True
-        model = SCAR(cfg).to(cfg.DEVICE)
-    if cfg.MODEL.MODEL_NAME == "SCAR":
+    if cfg.MODEL.MODEL_NAME == "SCAR_T":
         cfg.MODEL.VIL = False
+        cfg.MODEL.LSTM = True
+        model = SCAR(cfg).to(cfg.DEVICE)
+    if cfg.MODEL.MODEL_NAME == "SCAR_S":
+        cfg.MODEL.VIL = True
+        cfg.MODEL.LSTM = False
+        model = SCAR(cfg).to(cfg.DEVICE)
+    if cfg.MODEL.MODEL_NAME == "SCAR_X":
+        cfg.MODEL.VIL = True
+        cfg.MODEL.LSTM = True
         model = SCAR(cfg).to(cfg.DEVICE)
 
     optimizer = construct_optimizer(model, cfg)
@@ -503,9 +509,10 @@ def train():
         
         _ = misc.aggregate_sub_bn_stats(model)
 
-        # eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
-        epoch_timer.epoch_toc()
+        if cur_epoch+1 == cfg.SOLVER.MAX_EPOCH:
+            eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
 
+        epoch_timer.epoch_toc()
         cu.save_checkpoint(
             cfg.OUTPUT_DIR,
             model,
