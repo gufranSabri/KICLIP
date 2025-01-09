@@ -135,17 +135,21 @@ def test():
     for num_view in cfg.TEST.NUM_TEMPORAL_CLIPS:
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
-
         model = None
         if cfg.MODEL.MODEL_NAME == "FROSTER":
             model = TemporalClipVideo(cfg).to(cfg.DEVICE)
-        if cfg.MODEL.MODEL_NAME == "SCAR_VIL":
-            cfg.MODEL.VIL = True
-            model = SCAR(cfg).to(cfg.DEVICE)
-        if cfg.MODEL.MODEL_NAME == "SCAR":
+        if cfg.MODEL.MODEL_NAME == "SCAR_T":
             cfg.MODEL.VIL = False
+            cfg.MODEL.LSTM = True
             model = SCAR(cfg).to(cfg.DEVICE)
-
+        if cfg.MODEL.MODEL_NAME == "SCAR_S":
+            cfg.MODEL.VIL = True
+            cfg.MODEL.LSTM = False
+            model = SCAR(cfg).to(cfg.DEVICE)
+        if cfg.MODEL.MODEL_NAME == "SCAR_X":
+            cfg.MODEL.VIL = True
+            cfg.MODEL.LSTM = True
+            model = SCAR(cfg).to(cfg.DEVICE)
 
         if not cfg.TEST.CUSTOM_LOAD:
             cu.load_test_checkpoint(cfg, model)
