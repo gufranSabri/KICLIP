@@ -6,7 +6,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
 from clip.model import LayerNorm, QuickGELU
 from models.torch_utils import activation
-from models.scar_lstm import SCAR_LSTM
+from models.scar_components import *
 
 # TYPE 1: expand temporal attention view
 class TimesAttentionBlock(nn.Module):

@@ -136,7 +136,7 @@ def test():
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
         model = None
-        if cfg.MODEL.MODEL_NAME == "FROSTER":
+        if cfg.MODEL.MODEL_NAME == "TemporalClipVideo":
             model = TemporalClipVideo(cfg).to(cfg.DEVICE)
         if cfg.MODEL.MODEL_NAME == "SCAR_T":
             cfg.MODEL.VIL = False
