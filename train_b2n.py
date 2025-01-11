@@ -204,6 +204,12 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
 
         scaler.unscale_(optimizer)
 
+        # for name, param in model.model.visual.tempx_blocks.named_parameters():
+        #     if param.grad is not None:
+        #         print(f"{name}: {param.grad.norm():.4f}")
+        #     else:
+        #         print(f"{name}: No gradient")
+
         if cfg.SOLVER.CLIP_GRAD_VAL:
             grad_norm = torch.nn.utils.clip_grad_value_(
                 model.parameters(), cfg.SOLVER.CLIP_GRAD_VAL
@@ -366,7 +372,7 @@ def eval_epoch(loader, model, cur_epoch, cfg, val_meter, logger):
     top5_err = 100 - top5_acc
 
     logger("---------------------------------------------------------------------------")
-    logger(f"Epoch {cur_epoch+1} Training Results:")
+    logger(f"Epoch {cur_epoch+1} Val Results:")
     logger(f"Top-1 Error: {top1_err:.2f}% | Top-5 Error: {top5_err:.2f}%")
     logger(f"Top-1 Accuracy: {top1_acc:.2f}% | Top-5 Accruacy: {top5_acc:.2f}%")
     logger("---------------------------------------------------------------------------")
@@ -410,6 +416,7 @@ def train():
     logger("MODEL.TEMPORAL_MODELING_TYPE"+":"+ str(cfg.MODEL.TEMPORAL_MODELING_TYPE))
     logger("TRAIN.BATCH_SIZE"+":"+ str(cfg.TRAIN.BATCH_SIZE))
     logger("AUG.NUM_SAMPLE"+":"+ str(cfg.AUG.NUM_SAMPLE))
+    logger("MODEL.DISTILLATION_RATIO"+":"+ str(cfg.MODEL.DISTILLATION_RATIO))
     # logger("MULTIGRID.SHORT_CYCLE"+":"+ str(cfg.MULTIGRID.SHORT_CYCLE))
     # logger("MULTIGRID.LONG_CYCLE"+":"+ str(cfg.MULTIGRID.LONG_CYCLE))
     # logger("BN.NORM_TYPE"+":"+ str(cfg.BN.NORM_TYPE))
@@ -454,7 +461,7 @@ def train():
     logger("CONFIGS=============================================================\n")
 
     model = None
-    if cfg.MODEL.MODEL_NAME == "FROSTER":
+    if cfg.MODEL.MODEL_NAME == "TemporalClipVideo":
         model = TemporalClipVideo(cfg).to(cfg.DEVICE)
     if cfg.MODEL.MODEL_NAME == "SCAR_T":
         cfg.MODEL.VIL = False
@@ -470,6 +477,7 @@ def train():
         model = SCAR(cfg).to(cfg.DEVICE)
 
     optimizer = construct_optimizer(model, cfg)
+    # print(model)
 
     scaler = None
     if cfg.DEVICE == "mps":
@@ -509,8 +517,8 @@ def train():
         
         _ = misc.aggregate_sub_bn_stats(model)
 
-        if cur_epoch+1 == cfg.SOLVER.MAX_EPOCH:
-            eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
+        # if cur_epoch == 0:
+        #     eval_epoch(val_loader, model, cur_epoch, cfg, val_meter, logger)
 
         epoch_timer.epoch_toc()
         cu.save_checkpoint(

@@ -135,6 +135,7 @@ def test():
     for num_view in cfg.TEST.NUM_TEMPORAL_CLIPS:
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
+
         model = None
         if cfg.MODEL.MODEL_NAME == "TemporalClipVideo":
             model = TemporalClipVideo(cfg).to(cfg.DEVICE)
@@ -151,6 +152,7 @@ def test():
             cfg.MODEL.LSTM = True
             model = SCAR(cfg).to(cfg.DEVICE)
 
+
         if not cfg.TEST.CUSTOM_LOAD:
             cu.load_test_checkpoint(cfg, model)
 
@@ -160,7 +162,6 @@ def test():
             checkpoint = torch.load(custom_load_file, map_location='cpu')
             checkpoint_model = checkpoint['model_state']
             state_dict = model.state_dict()
-
 
             if 'module' in list(state_dict.keys())[0]:
                 new_checkpoint_model = {} 

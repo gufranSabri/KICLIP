@@ -2,12 +2,9 @@ import torch
 import os
 from pprint import pprint
 
-raw_clip = '/Users/gufran/.cache/clip/ViT-B-16.pt'
-# source_dir = '/DDN_ROOT/ytcheng/code/patching_checkpoint/basetraining/temporalclip_vitb16_8x16_interpolation_bugfix_0.5ratio_rand0.0_0.6sample_seed2/checkpoints'
-# output_dir = '/DDN_ROOT/ytcheng/code/patching_checkpoint/basetraining/temporalclip_vitb16_8x16_interpolation_bugfix_0.5ratio_rand0.0_0.6sample_seed2/wa_checkpoints'
-source_dir = './basetraining/B2N_hmdb51_scar_2025-01-09_15-28-13/checkpoints'
-output_dir = './basetraining/B2N_hmdb51_scar_2025-01-09_15-28-13/wa_checkpoints'
-
+raw_clip = '/home/g202302610/.cache/clip/ViT-B-16.pt'
+source_dir = './basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52/checkpoints'
+output_dir = './basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52/wa_checkpoints'
 
 wa_start = 2
 wa_end = 22
@@ -33,6 +30,10 @@ def average_checkpoint(checkpoint_list):
         elif 'adapter' in k:
             modded_model_keys.append(k)
         elif 'post_prompt' in k:
+            modded_model_keys.append(k)
+        elif "tempx_blocks" in k:
+            modded_model_keys.append(k)
+        elif "dca" in k:
             modded_model_keys.append(k)
         elif "lstm" in k:
             modded_model_keys.append(k)
@@ -60,6 +61,8 @@ def average_checkpoint(checkpoint_list):
         state_dict[key] = []
         for ckpt in new_ckpt_list:
             state_dict[key].append(ckpt[1][key])
+        if "agg_weights" in key:
+            print(state_dict[key])
     
     for key in state_dict:
         try:
