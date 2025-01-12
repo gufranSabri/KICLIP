@@ -8,6 +8,38 @@ from clip.model import LayerNorm, QuickGELU
 from models.torch_utils import activation
 from models.scar_components import *
 
+class ResidualAttentionBlock(nn.Module):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, num_experts=0, record_routing=False, routing_type='patch-level'):
+        super().__init__()
+
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model))
+        ]))
+        self.num_experts = num_experts
+        self.record_routing = record_routing
+        self.routing_type = routing_type
+
+        if num_experts > 0:    
+            self.experts_head = nn.Sequential(*[nn.Sequential(OrderedDict([
+                    ("c_fc", nn.Linear(d_model, d_model * 4)),
+                    ("gelu", QuickGELU()),
+                    # ("c_proj", nn.Linear(d_model * 4, d_model))
+                ])) for _ in range(num_experts)])
+            
+            self.experts_tail = nn.Sequential(*[nn.Sequential(OrderedDict([
+                    ("c_proj", nn.Linear(d_model * 4, d_model))
+                ])) for _ in range(num_experts)])
+            
+            self.routing1 = nn.Linear(d_model, self.num_experts + 1)
+            self.routing2 = nn.Linear(d_model*4, self.num_experts + 1)
+        
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+
 # TYPE 1: expand temporal attention view
 class TimesAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, T=0, temporal_modeling_type='expand_temporal_view'):
