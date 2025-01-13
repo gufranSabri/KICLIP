@@ -147,36 +147,38 @@ configuration = VivitConfig()
 model = VivitModel(configuration)
 print(model)
 
-# Prepare inputs
-inputs = image_processor(list(video), return_tensors="pt")
-print("Input keys:", inputs.keys())
-print("Input shape:", inputs["pixel_values"].shape)
+print(model.encoder.state_dict())
 
-# Define a hook to print shapes
-def hook_fn(module, input, output):
-    print(f"{module.__class__.__name__}:")
-    if isinstance(input, tuple) and input:
-        print(f"  Input shape: {[i.shape for i in input if isinstance(i, torch.Tensor)]}")
-    if isinstance(output, torch.Tensor):
-        print(f"  Output shape: {output.shape}")
-    elif isinstance(output, (list, tuple)):
-        print(f"  Output shape: {[o.shape for o in output if isinstance(o, torch.Tensor)]}")
+# # Prepare inputs
+# inputs = image_processor(list(video), return_tensors="pt")
+# print("Input keys:", inputs.keys())
+# print("Input shape:", inputs["pixel_values"].shape)
 
-# Register hooks for each module in the model
-hooks = []
-for name, module in model.named_modules():
-    # print(name)
-    hooks.append(module.register_forward_hook(hook_fn))
+# # Define a hook to print shapes
+# def hook_fn(module, input, output):
+#     print(f"{module.__class__.__name__}:")
+#     if isinstance(input, tuple) and input:
+#         print(f"  Input shape: {[i.shape for i in input if isinstance(i, torch.Tensor)]}")
+#     if isinstance(output, torch.Tensor):
+#         print(f"  Output shape: {output.shape}")
+#     elif isinstance(output, (list, tuple)):
+#         print(f"  Output shape: {[o.shape for o in output if isinstance(o, torch.Tensor)]}")
 
-# Perform a forward pass
-print("\nPerforming forward pass...")
-with torch.no_grad():
-    outputs = model(**inputs)
+# # Register hooks for each module in the model
+# hooks = []
+# for name, module in model.named_modules():
+#     # print(name)
+#     hooks.append(module.register_forward_hook(hook_fn))
 
-# Remove hooks after use
-for hook in hooks:
-    hook.remove()
+# # Perform a forward pass
+# print("\nPerforming forward pass...")
+# with torch.no_grad():
+#     outputs = model(**inputs)
 
-# Print final output shape
-print("\nFinal Output shape:", outputs.last_hidden_state.shape)
+# # Remove hooks after use
+# for hook in hooks:
+#     hook.remove()
+
+# # Print final output shape
+# print("\nFinal Output shape:", outputs.last_hidden_state.shape)
 

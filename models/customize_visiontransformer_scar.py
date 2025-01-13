@@ -40,6 +40,69 @@ class ResidualAttentionBlock(nn.Module):
         self.ln_2 = LayerNorm(d_model)
         self.attn_mask = attn_mask
 
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, x):
+        if type(x) == tuple:
+            x, routing_state = x
+        else:
+            routing_state = None
+
+        x = x + self.attention(self.ln_1(x))
+        ln_x = self.ln_2(x)
+        # x = x + self.mlp(self.ln_2(x))
+        if self.num_experts > 0:
+            # output = self.experts_tail[0](self.experts_head[0][1](self.experts_head[0][0](ln_x)))
+             
+            output_head = [self.mlp[0](ln_x)]
+            [output_head.append(self.experts_head[i][0](ln_x)) for i in range(self.num_experts)]
+            
+            if self.routing_type == 'patch-level':
+                rout1 = torch.nn.functional.softmax(self.routing1(ln_x), -1).unsqueeze(-1)
+            elif self.routing_type == 'image-level':
+                rout1 = torch.nn.functional.softmax(self.routing1(ln_x[0].unsqueeze(0)), -1).unsqueeze(-1)
+
+            output_head = torch.stack(output_head, 0).permute(1,2,0,3)
+            output_head = (rout1 * output_head).sum(-2)
+            output_head = self.mlp[1](output_head)
+            
+            """
+            output_head = [self.mlp[1](self.mlp[0](ln_x))]
+            [output_head.append(self.experts_head[i](ln_x)) for i in range(self.num_experts)]
+            rout1 = torch.nn.functional.softmax(self.routing1(ln_x), -1).unsqueeze(-1)
+            output_head = torch.stack(output_head, 0).permute(1,2,0,3)
+            output_head = (rout1 * output_head).sum(-2)
+            """    
+            
+            output = [self.mlp[2](output_head)]
+            [output.append(self.experts_tail[i](output_head)) for i in range(self.num_experts)]
+            # rout2 = torch.nn.functional.softmax(self.routing2(output_head), -1).unsqueeze(-1)
+            if self.routing_type == 'patch-level':
+                rout2 = torch.nn.functional.softmax(self.routing2(output_head), -1).unsqueeze(-1)
+            elif self.routing_type == 'image-level':
+                rout2 = torch.nn.functional.softmax(self.routing2(output_head[0].unsqueeze(0)), -1).unsqueeze(-1)
+            output = torch.stack(output, 0).permute(1,2,0,3)
+            output = (rout2 * output).sum(-2)
+            
+        else:
+            output = self.mlp(ln_x)
+        
+        x = x + output
+        # x = x + self.experts[0](self.ln_2(x))
+        if self.record_routing:
+            if self.num_experts > 0:
+                current_rout = torch.stack([rout1.squeeze(-1), rout2.squeeze(-1)], 0)    
+                if routing_state == None:
+                    routing_state = current_rout
+                else:
+                    routing_state = torch.cat([routing_state, current_rout], 0)
+             
+            return x, routing_state
+        
+        return x
+
 # TYPE 1: expand temporal attention view
 class TimesAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, T=0, temporal_modeling_type='expand_temporal_view'):
