@@ -3,8 +3,8 @@ import os
 from pprint import pprint
 
 raw_clip = '/home/g202302610/.cache/clip/ViT-B-16.pt'
-source_dir = './basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52/checkpoints'
-output_dir = './basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52/wa_checkpoints'
+source_dir = './basetraining/B2N_k400_scar/checkpoints'
+output_dir = './basetraining/B2N_k400_scar/wa_checkpoints'
 
 wa_start = 2
 wa_end = 22
@@ -38,6 +38,8 @@ def average_checkpoint(checkpoint_list):
         elif "lstm" in k:
             modded_model_keys.append(k)
         elif ".vil" in k:
+            modded_model_keys.append(k)
+        elif ".tvil" in k:
             modded_model_keys.append(k)
 
     # threshold filter
@@ -81,4 +83,3 @@ checkpoint_list = sorted(checkpoint_list, key=lambda d: d[1])
 
 swa_state_dict = average_checkpoint(checkpoint_list)
 torch.save({'model_state': swa_state_dict}, os.path.join(output_dir, 'swa_%d_%d.pth'%(wa_start, wa_end)))
-

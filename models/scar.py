@@ -108,6 +108,9 @@ class SCAR(nn.Module):
             expert_insert_layers=cfg.MODEL.EXPERT_INSERT_LAYERS,
             record_routing=cfg.MODEL.RECORD_ROUTING, 
             routing_type=cfg.MODEL.ROUTING_TYPE,
+            vil=cfg.MODEL.VIL,
+            add_spatial_model=cfg.MODEL.ADD_SPATIAL_MODEL,
+            add_temporal_model=cfg.MODEL.ADD_TEMPORAL_MODEL
         )
         if cfg.MODEL.KEEP_RAW_MODEL:   
             self.raw_model, self.preprocess = load("ViT-B/16", jit=False, 
@@ -319,6 +322,10 @@ class WCLIP(CLIP):
         expert_insert_layers=[],
         record_routing=False,
         routing_type = 'patch-level',
+
+        vil=False,
+        add_spatial_model=False,
+        add_temporal_model=False
     ):
         super().__init__(
                 embed_dim,
@@ -342,6 +349,9 @@ class WCLIP(CLIP):
             expert_insert_layers=expert_insert_layers,
             record_routing = record_routing,
             routing_type = routing_type,
+            vil=vil,
+            add_spatial_model=add_spatial_model,
+            add_temporal_model=add_temporal_model
         )
 
         self.transformer = Transformer(
@@ -411,6 +421,9 @@ def build_model(
         expert_insert_layers=[], 
         record_routing=False, 
         routing_type='patch-level',
+        vil=False,
+        add_spatial_model=False,
+        add_temporal_model=False
     ):
 
     if "visual.proj" in state_dict:
@@ -443,6 +456,9 @@ def build_model(
         expert_insert_layers=expert_insert_layers,
         record_routing=record_routing,
         routing_type=routing_type,
+        vil=vil,
+        add_spatial_model=add_spatial_model,
+        add_temporal_model=add_temporal_model
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
@@ -488,6 +504,9 @@ def load(name: str,
         expert_insert_layers=[], 
         record_routing=False, 
         routing_type='patch-level',
+        vil=False,
+        add_spatial_model=False,
+        add_temporal_model=False
     ):
     
     if name in _MODELS:
@@ -510,7 +529,8 @@ def load(name: str,
         T=T, temporal_modeling_type=temporal_modeling_type, 
         use_checkpoint=use_checkpoint, context_length = context_length,
         num_experts=num_experts, expert_insert_layers=expert_insert_layers,
-        record_routing=record_routing, routing_type=routing_type
+        record_routing=record_routing, routing_type=routing_type,
+        vil=vil,add_spatial_model=add_spatial_model,add_temporal_model=add_temporal_model
     ).to(device)
 
     return model, _transform(model.visual.input_resolution)

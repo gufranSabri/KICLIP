@@ -23,6 +23,7 @@ from models.contrastive import (
 )
 from logger import Logger
 import datetime
+import shutil
 
 def construct_optimizer(model, cfg):
     bn_parameters = []
@@ -385,8 +386,11 @@ def train():
     args = parse_args()
     date = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-    output_path = "_".join([args.opts[args.opts.index("OUTPUT_DIR")+1], date])
-    args.opts[args.opts.index("OUTPUT_DIR")+1] = output_path
+    # output_path = "_".join([args.opts[args.opts.index("OUTPUT_DIR")+1], date])
+    # args.opts[args.opts.index("OUTPUT_DIR")+1] = output_path
+
+    if os.path.exists(args.opts[args.opts.index("OUTPUT_DIR")+1]):
+        shutil.rmtree(args.opts[args.opts.index("OUTPUT_DIR")+1])
 
     for path_to_config in args.cfg_files:
         cfg = load_config(args, path_to_config)
@@ -408,76 +412,25 @@ def train():
         torch.backends.cudnn.deterministic=True
         torch.backends.cudnn.benchmark = False
 
-    cfg.OUTPUT_DIR = output_path
+    # cfg.OUTPUT_DIR = output_path
     logger = Logger(os.path.join(cfg.OUTPUT_DIR, "log.txt"))
 
     logger("\nCONFIGS=============================================================")
     logger("MODEL.MODEL_NAME"+":"+ str(cfg.MODEL.MODEL_NAME))
-    logger("MODEL.TEMPORAL_MODELING_TYPE"+":"+ str(cfg.MODEL.TEMPORAL_MODELING_TYPE))
-    logger("TRAIN.BATCH_SIZE"+":"+ str(cfg.TRAIN.BATCH_SIZE))
-    logger("AUG.NUM_SAMPLE"+":"+ str(cfg.AUG.NUM_SAMPLE))
     logger("MODEL.DISTILLATION_RATIO"+":"+ str(cfg.MODEL.DISTILLATION_RATIO))
-    # logger("MULTIGRID.SHORT_CYCLE"+":"+ str(cfg.MULTIGRID.SHORT_CYCLE))
-    # logger("MULTIGRID.LONG_CYCLE"+":"+ str(cfg.MULTIGRID.LONG_CYCLE))
-    # logger("BN.NORM_TYPE"+":"+ str(cfg.BN.NORM_TYPE))
-    logger("NUM_GPUS"+":"+ str(cfg.NUM_GPUS))
-    # logger("TRAIN.CUSTOM_LOAD"+":"+ str(cfg.TRAIN.CUSTOM_LOAD))
-    # logger("SOLVER.LAYER_DECAY"+":"+ str(cfg.SOLVER.LAYER_DECAY))
-    # logger("MODEL.FINETUNE_FACTOR"+":"+ str(cfg.MODEL.FINETUNE_FACTOR))
-    # logger("MODEL.ADAPT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.ADAPT_FINETUNE_FACTOR))
-    # logger("MODEL.DEFAULT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.DEFAULT_FINETUNE_FACTOR))
-    # logger("MODEL.MLP_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.MLP_FINETUNE_FACTOR))
-    # logger("MODEL.EXPERT_FINETUNE_FACTOR"+":"+ str(cfg.MODEL.EXPERT_FINETUNE_FACTOR))
-    logger("SOLVER.OPTIMIZING_METHOD"+":"+ str(cfg.SOLVER.OPTIMIZING_METHOD))
-    # logger("SOLVER.LARS_ON"+":"+ str(cfg.SOLVER.LARS_ON))
-    logger("TRAIN.MIXED_PRECISION"+":"+ str(cfg.TRAIN.MIXED_PRECISION))
-    logger("TRAIN.AUTO_RESUME"+":"+ str(cfg.TRAIN.AUTO_RESUME))
-    # logger("DETECTION.ENABLE"+":"+ str(cfg.DETECTION.ENABLE))
-    # logger("DATA.TRAIN_CROP_NUM_TEMPORAL"+":"+ str(cfg.DATA.TRAIN_CROP_NUM_TEMPORAL))
-    # logger("DATA.TRAIN_CROP_NUM_SPATIAL"+":"+ str(cfg.DATA.TRAIN_CROP_NUM_SPATIAL))
-    # logger("MIXUP.ENABLE"+":"+ str(cfg.MIXUP.ENABLE))
-    # logger("BN.USE_PRECISE_STATS"+":"+ str(cfg.BN.USE_PRECISE_STATS))
-    # logger("TASK"+":"+ str(cfg.TASK))
-    # logger("CONTRASTIVE.KNN_ON"+":"+ str(cfg.CONTRASTIVE.KNN_ON))
-    # logger("TENSORBOARD.ENABLE"+":"+ str(cfg.TENSORBOARD.ENABLE))
-    # logger("NUM_SHARDS"+":"+ str(cfg.NUM_SHARDS))
-    logger("VAL_MODE"+":"+ str(cfg.VAL_MODE))
-    # logger("TRAIN.EWC_SET"+":"+ str(cfg.TRAIN.EWC_SET))
-    # logger("DATA.LOADER_CHUNK_SIZE"+":"+ str(cfg.DATA.LOADER_CHUNK_SIZE))
-    # logger("TRAIN.ZS_CONS"+":"+ str(cfg.TRAIN.ZS_CONS))
-    # logger("TRAIN.CLIP_ORI_PATH"+":"+ str(cfg.TRAIN.CLIP_ORI_PATH))
-    # logger("MODEL.FROZEN_BN"+":"+ str(cfg.MODEL.FROZEN_BN))
-    logger("MODEL.LOSS_FUNC"+":"+ str(cfg.MODEL.LOSS_FUNC))
-    # logger("TRAIN.LINEAR_CONNECT_CLIMB"+":"+ str(cfg.TRAIN.LINEAR_CONNECT_CLIMB))
-    logger("MODEL.KEEP_RAW_MODEL"+":"+ str(cfg.MODEL.KEEP_RAW_MODEL))
-    logger("MODEL.RAW_MODEL_DISTILLATION"+":"+ str(cfg.MODEL.RAW_MODEL_DISTILLATION))
-    # logger("MASK.ENABLE"+":"+ str(cfg.MASK.ENABLE))
-    # logger("MODEL.RECORD_ROUTING"+":"+ str(cfg.MODEL.RECORD_ROUTING))
-    # logger("SOLVER.CLIP_GRAD_VAL"+":"+ str(cfg.SOLVER.CLIP_GRAD_VAL))
-    # logger("SOLVER.CLIP_GRAD_L2NORM"+":"+ str(cfg.SOLVER.CLIP_GRAD_L2NORM))
-    # logger("DATA.MULTI_LABEL"+":"+ str(cfg.DATA.MULTI_LABEL))
-    # logger("DATA.IN22k_VAL_IN1K"+":"+ str(cfg.DATA.IN22k_VAL_IN1K))
-    # logger("MODEL.FP16_ALLREDUCE"+":"+ str(cfg.MODEL.FP16_ALLREDUCE))
     logger("CONFIGS=============================================================\n")
 
     model = None
     if cfg.MODEL.MODEL_NAME == "TemporalClipVideo":
         model = TemporalClipVideo(cfg).to(cfg.DEVICE)
-    if cfg.MODEL.MODEL_NAME == "SCAR_T":
-        cfg.MODEL.VIL = False
-        cfg.MODEL.LSTM = True
-        model = SCAR(cfg).to(cfg.DEVICE)
-    if cfg.MODEL.MODEL_NAME == "SCAR_S":
-        cfg.MODEL.VIL = True
-        cfg.MODEL.LSTM = False
-        model = SCAR(cfg).to(cfg.DEVICE)
-    if cfg.MODEL.MODEL_NAME == "SCAR_X":
-        cfg.MODEL.VIL = True
-        cfg.MODEL.LSTM = True
+    else:
+        model_config = cfg.MODEL.MODEL_NAME.split("_")[1]
+        cfg.MODEL.VIL = len(model_config) == 2
+        cfg.MODEL.ADD_SPATIAL_MODEL = model_config[0] in ["X", "S"]
+        cfg.MODEL.ADD_TEMPORAL_MODEL = model_config[0] in ["X", "T"]
         model = SCAR(cfg).to(cfg.DEVICE)
 
     optimizer = construct_optimizer(model, cfg)
-    # print(model)
 
     scaler = None
     if cfg.DEVICE == "mps":
