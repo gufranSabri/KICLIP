@@ -12,13 +12,14 @@ from utils.parser import load_config, parse_args
 import utils.checkpoint as cu
 from config.defaults import assert_and_infer_cfg
 from models.temporalclip_video_model import TemporalClipVideo
-from models.scar import SCAR
+from models.kiclip import KICLIP
 from pprint import pprint
-
+import datetime
+from logger import Logger
 
 def construct_loader(cfg, split="train"):
     shuffle = False
-    drop_last = False
+    drop_last = True
 
     if split in ["train"]:
         dataset_name = cfg.TRAIN.DATASET
@@ -135,23 +136,20 @@ def test():
     for num_view in cfg.TEST.NUM_TEMPORAL_CLIPS:
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
-
         model = None
         if cfg.MODEL.MODEL_NAME == "TemporalClipVideo":
             model = TemporalClipVideo(cfg).to(cfg.DEVICE)
-        if cfg.MODEL.MODEL_NAME == "SCAR_T":
+        elif cfg.MODEL.MODEL_NAME == "KICLIP":
             cfg.MODEL.VIL = False
-            cfg.MODEL.LSTM = True
-            model = SCAR(cfg).to(cfg.DEVICE)
-        if cfg.MODEL.MODEL_NAME == "SCAR_S":
-            cfg.MODEL.VIL = True
-            cfg.MODEL.LSTM = False
-            model = SCAR(cfg).to(cfg.DEVICE)
-        if cfg.MODEL.MODEL_NAME == "SCAR_X":
-            cfg.MODEL.VIL = True
-            cfg.MODEL.LSTM = True
-            model = SCAR(cfg).to(cfg.DEVICE)
-
+            cfg.MODEL.ADD_SPATIAL_MODEL = False
+            cfg.MODEL.ADD_TEMPORAL_MODEL = False
+            model = KICLIP(cfg).to(cfg.DEVICE)
+        else:
+            model_config = cfg.MODEL.MODEL_NAME.split("_")[1]
+            cfg.MODEL.VIL = len(model_config) == 2
+            cfg.MODEL.ADD_SPATIAL_MODEL = model_config[0] in ["X", "S"]
+            cfg.MODEL.ADD_TEMPORAL_MODEL = model_config[0] in ["X", "T"]
+            model = KICLIP(cfg).to(cfg.DEVICE)
 
         if not cfg.TEST.CUSTOM_LOAD:
             cu.load_test_checkpoint(cfg, model)
@@ -166,10 +164,11 @@ def test():
             if 'module' in list(state_dict.keys())[0]:
                 new_checkpoint_model = {} 
                 for key, value in checkpoint_model.items():
+                    if "raw_model" in key: continue
                     new_checkpoint_model['module.' + key] = value
                 checkpoint_model = new_checkpoint_model
             
-            model.load_state_dict(checkpoint_model, strict=True)
+            model.load_state_dict(checkpoint_model, strict=False)
             model = model.to(cfg.DEVICE)
 
             test_loader = construct_loader(cfg, "test")
@@ -186,7 +185,7 @@ def test():
 
             test_meter = perform_test(test_loader, model, test_meter, cfg)
             test_meters.append(test_meter)
-
+    
     for view, test_meter in zip(cfg.TEST.NUM_TEMPORAL_CLIPS, test_meters):
         print("View: {}".format(view))
         print("Top1 Acc: {}".format(test_meter.stats["top1_acc"]))

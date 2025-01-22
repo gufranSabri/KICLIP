@@ -46,7 +46,7 @@ SOLVER:
 MODEL:
   NUM_CLASSES: 26
   ARCH: vitb16
-  MODEL_NAME: SCAR_T
+  MODEL_NAME: SCAR
   LOSS_FUNC: cross_entropy
   DROPOUT_RATE: 0.5
   TEMPORAL_MODELING_TYPE: expand_temporal_view

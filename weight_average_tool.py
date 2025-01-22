@@ -3,8 +3,8 @@ import os
 from pprint import pprint
 
 raw_clip = '/home/g202302610/.cache/clip/ViT-B-16.pt'
-source_dir = './basetraining/B2N_k400_scar/checkpoints'
-output_dir = './basetraining/B2N_k400_scar/wa_checkpoints'
+source_dir = './basetraining/B2N_hmdb51_KICLIP/checkpoints'
+output_dir = './basetraining/B2N_hmdb51_KICLIP/wa_checkpoints'
 
 wa_start = 2
 wa_end = 22
@@ -37,9 +37,11 @@ def average_checkpoint(checkpoint_list):
             modded_model_keys.append(k)
         elif "lstm" in k:
             modded_model_keys.append(k)
-        elif ".vil" in k:
+        elif "spatial_model" in k:
             modded_model_keys.append(k)
-        elif ".tvil" in k:
+        elif "temporal_model" in k:
+            modded_model_keys.append(k)
+        elif "resblocks_f" in k:
             modded_model_keys.append(k)
 
     # threshold filter
@@ -52,6 +54,8 @@ def average_checkpoint(checkpoint_list):
     
     print("Files with the following paths will participate in the parameter averaging")
     print(ckpt_id_list)
+
+    pprint(modded_model_keys)
 
     state_dict = {}
     for key in raw_clip_weight:
@@ -83,3 +87,4 @@ checkpoint_list = sorted(checkpoint_list, key=lambda d: d[1])
 
 swa_state_dict = average_checkpoint(checkpoint_list)
 torch.save({'model_state': swa_state_dict}, os.path.join(output_dir, 'swa_%d_%d.pth'%(wa_start, wa_end)))
+

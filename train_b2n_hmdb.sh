@@ -9,10 +9,8 @@ TEST_FILE=test.csv
 
 cd $ROOT
 
-# --cfg ./config_files/Kinetics/SCAR_vitb16_8x16_STAdapter_HMDB51.yaml \
-
 CUDA_VISIBLE_DEVICES=1 python3 train_b2n.py \
-    --cfg ./config_files/Kinetics/SCAR_vitb16_8x16_STAdapter_HMDB51.yaml \
+    --cfg ./config_files/Kinetics/KICLIP_vitb16_8x16_STAdapter_HMDB51.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_hmdb \
     DATA.PATH_PREFIX ./data/hmdb51/videos \
     TRAIN_FILE $TRAIN_FILE \
@@ -21,7 +19,7 @@ CUDA_VISIBLE_DEVICES=1 python3 train_b2n.py \
     DATA.PATH_LABEL_SEPARATOR , \
     DATA.INDEX_LABEL_MAPPING_FILE ./zs_label_db/B2N_hmdb/train_rephrased.json \
     TRAIN.ENABLE True \
-    OUTPUT_DIR $CKPT/basetraining/B2N_hmdb51_scar \
+    OUTPUT_DIR $CKPT/basetraining/B2N_hmdb51_KICLIP \
     TRAIN.BATCH_SIZE 4 \
     TEST.BATCH_SIZE 4 \
     TEST.NUM_ENSEMBLE_VIEWS 3 \
@@ -46,4 +44,4 @@ CUDA_VISIBLE_DEVICES=1 python3 train_b2n.py \
     TRAIN.LINEAR_CONNECT_LOSS_RATIO 0.0 \
     MODEL.RAW_MODEL_DISTILLATION True \
     MODEL.KEEP_RAW_MODEL True \
-    MODEL.DISTILLATION_RATIO 0.5
+    MODEL.DISTILLATION_RATIO 2.0

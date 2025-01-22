@@ -1,7 +1,7 @@
 ROOT=./
-CKPT=./basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52
-OUT_DIR=./basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52/testing
-LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_scar_2025-01-11_21-08-52/wa_checkpoints/swa_2_22.pth
+CKPT=./basetraining/B2N_hmdb51_KICLIP
+OUT_DIR=./basetraining/B2N_hmdb51_KICLIP/testing
+LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_KICLIP/wa_checkpoints/swa_2_22.pth
 
 # TEST_FILE can be set as val.csv (base set) or test.csv (novel set).
 # rephrased_file can be set as train_rephrased.json (base set) or test_rephrased.json (novel set)
@@ -15,8 +15,8 @@ NUM_CLASSES=25
 
 cd $ROOT
 
-CUDA_VISIBLE_DEVICES=0 python3 -W ignore -u test_b2n.py \
-    --cfg ./config_files/Kinetics/SCAR_vitb16_8x16_STAdapter_HMDB51.yaml \
+CUDA_VISIBLE_DEVICES=1 python3 -W ignore -u test_b2n.py \
+    --cfg ./config_files/Kinetics/KICLIP_vitb16_8x16_STAdapter_HMDB51.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_hmdb \
     DATA.PATH_PREFIX ./data/hmdb51/videos \
     TRAIN_FILE $TRAIN_FILE \
@@ -48,8 +48,8 @@ NUM_CLASSES=26
 
 cd $ROOT
 
-CUDA_VISIBLE_DEVICES=0 python3 -W ignore -u test_b2n.py \
-    --cfg ./config_files/Kinetics/SCAR_vitb16_8x16_STAdapter_HMDB51.yaml \
+CUDA_VISIBLE_DEVICES=1 python3 -W ignore -u test_b2n.py \
+    --cfg ./config_files/Kinetics/KICLIP_vitb16_8x16_STAdapter_HMDB51.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_hmdb \
     DATA.PATH_PREFIX ./data/hmdb51/videos \
     TRAIN_FILE $TRAIN_FILE \

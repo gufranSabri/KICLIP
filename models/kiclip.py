@@ -5,18 +5,20 @@ import warnings
 import random
 from typing import Tuple, Union
 from pprint import pprint
+import copy
 
 import torch
 import torch.nn as nn
+import torchvision.models as models
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from clip.model import CLIP,LayerNorm,Transformer
 from clip.clip import _MODELS, _download, tokenize
-from models.customize_visiontransformer_scar import TemporalVisionTransformer
+from models.customize_visiontransformer_kiclip import TemporalVisionTransformer
 
-class SCAR(nn.Module):
+class KICLIP(nn.Module):
     def __init__(self, cfg):
-        super(SCAR, self).__init__()
+        super(KICLIP, self).__init__()
         
         self.device = cfg.DEVICE
         self.cfg = cfg
@@ -27,6 +29,9 @@ class SCAR(nn.Module):
 
         for k, v in self.model.named_parameters():
             v.requires_grad = True
+
+        for k, v in self.model.visual.transformer.resblocks_f.named_parameters():
+            v.requires_grad = False
 
         self.text_dict = self.text_prompt(os.path.join(cfg.DATA.INDEX_LABEL_MAPPING_FILE))
         if not cfg.TEST.OPENSET: self.text_dict = self.text_prompt(os.path.join(cfg.DATA.INDEX_LABEL_MAPPING_FILE))
@@ -56,6 +61,20 @@ class SCAR(nn.Module):
         )
         nn.init.zeros_(self.projector_t[2].weight)
         nn.init.kaiming_normal_(self.projector_t[0].weight)
+
+        model_name = "vit_b_16"
+        model = getattr(models, model_name)(pretrained=True)
+
+        vit_head = copy.deepcopy(model.heads.head)
+        del model
+
+        self.res_classifier = nn.Sequential(
+            nn.Linear(self.model.embed_dim, 768),
+            nn.GELU(),
+            vit_head,
+            nn.GELU(),
+            nn.Linear(1000, cfg.MODEL.NUM_CLASSES)
+        )
 
         if self.tune_head:
             self.dynamic_classifier = self.achieve_csf_matrix(self.text_dict, self.model)
@@ -126,7 +145,7 @@ class SCAR(nn.Module):
             for _, p in self.raw_model.named_parameters():
                 p.requires_grad = False
 
-        self.model.visual.construct_scar_components()
+        self.model.visual.construct_kiclip_components()
 
         self.model.float() 
         if cfg.MODEL.KEEP_RAW_MODEL:
@@ -188,12 +207,15 @@ class SCAR(nn.Module):
                 raw_img_encode /= raw_img_encode.norm(dim=-1, keepdim=True)
 
                 dynamic_classifier_raw = self.achieve_csf_matrix(text_dict, self.raw_model, trainable=False)
-                
+
                 alpha = 0.1
-                img_encode = img_encode + alpha * self.projector_v(img_encode)
+                img_encode = img_encode + alpha * self.projector_v(img_encode) # [bT, 512]
                 dynamic_classifier_new = dynamic_classifier_new + alpha * self.projector_t(dynamic_classifier_new)
 
-                return [pred, img_encode, dynamic_classifier_new], [None, raw_img_encode, dynamic_classifier_raw]
+                img_encode_r = img_encode.reshape(bz, clip_len, img_encode.shape[-1]).mean(dim=1)
+                res_clf = self.res_classifier(img_encode_r) # [bT, nc]
+
+                return [pred, img_encode, dynamic_classifier_new], [None, raw_img_encode, dynamic_classifier_raw], res_clf
 
             return pred
         
@@ -290,10 +312,10 @@ class SCAR(nn.Module):
             csf_matrix_list = [model.encode_text(text_dict[i].to(self.device)) for i in range(len(text_dict))]
             for csf_matrix in csf_matrix_list:
                 csf_matrix = csf_matrix / csf_matrix.norm(dim=-1, keepdim=True)
-        
+
         csf_matrix = torch.stack(csf_matrix_list, 0).mean(0) #average out the default text + rephrased prompt features
         csf_matrix = csf_matrix / csf_matrix.norm(dim=-1, keepdim=True)
-        
+
         return csf_matrix
 
 class WCLIP(CLIP):

@@ -7,7 +7,6 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
 from clip.model import LayerNorm, QuickGELU
 from models.torch_utils import activation
-from models.scar_components import *
 
 class ResidualAttentionBlock(nn.Module):
     def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, num_experts=0, record_routing=False, routing_type='patch-level'):
@@ -161,18 +160,45 @@ class TSTransformer(nn.Module):
         elif self.temporal_modeling_type == "expand_temporal_view":
             print("INITIALIZING TIMES ATTENTION")
             self.resblocks = nn.Sequential(*[TimesAttentionBlock(width, heads, attn_mask, T=T, temporal_modeling_type=self.temporal_modeling_type) for _ in range(layers)])
+            
         self.layers = layers
+        self.width = width
+        self.heads = heads
+        self.attn_mask = attn_mask
+        self.num_experts = num_experts
+        self.record_routing = record_routing
+        self.routing_type = routing_type
+        self.expert_insert_layers = expert_insert_layers
+        self.tuned_model = False
 
     def forward(self, x, prompt_token=None):
+        x_t = x.clone()
         if not self.use_checkpoint:
-            for block in self.resblocks:
-                x = block(x)
+            if self.tuned_model:
+                for i in range(self.layers):
+                    x = (x+x_t)/2
+                    x_t = self.resblocks_f[i](x_t)
+                    x = self.resblocks[i](x)
+
+            else:
+                for block in self.resblocks:
+                    x = block(x)
             return x
         else:
             return checkpoint_sequential(self.resblocks, 3, x)
 
+    def construct_kiclip_components(self):
+        print("Injection module initialized")
+        self.resblocks_f = nn.Sequential(*[ResidualAttentionBlock(self.width, self.heads, self.attn_mask, self.num_experts, self.record_routing, self.routing_type) if layer_id in self.expert_insert_layers else ResidualAttentionBlock(self.width, self.heads, self.attn_mask, record_routing=self.record_routing, routing_type=self.routing_type) for layer_id in range(self.layers)])
+        self.resblocks_f.load_state_dict(self.resblocks.state_dict())
+
+        for k, v in self.resblocks_f.named_parameters():
+            v.requires_grad = False
+
+        self.tuned_model = True
+
 class TemporalVisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level', vil=True, add_spatial_model=True, add_temporal_model=True):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, T = 8, temporal_modeling_type = None, use_checkpoint = False, num_experts=0, expert_insert_layers=[], record_routing=False, routing_type='patch-level', vil=True, add_spatial_model=False, add_temporal_model=False):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
@@ -199,34 +225,21 @@ class TemporalVisionTransformer(nn.Module):
         self.add_temporal_model = add_temporal_model
         self.vil = vil
 
-        self.width = width
-        self.layers = layers
-        self.heads = heads
-        self.num_experts = num_experts
-        self.expert_insert_layers = expert_insert_layers
-        self.record_routing = record_routing
-        self.routing_type = routing_type
-
-    def construct_scar_components(self):
-        if self.add_spatial_model and self.vil:
+    def construct_kiclip_components(self):
+        if self.add_spatial_model:
             self.spatial_model = torch.hub.load("nx-ai/vision-lstm", "vil2-base")
             self.spatial_model.patch_embed = torch.nn.Identity()
             self.spatial_model.pos_embed = torch.nn.Identity()
             self.spatial_model.head = torch.nn.Linear(1536, 768)
-        elif self.add_spatial_model:
-            self.spatial_model = TSTransformer(self.width, self.layers, self.heads, use_checkpoint=self.use_checkpoint, T=self.T, temporal_modeling_type=None, num_experts=self.num_experts, expert_insert_layers=self.expert_insert_layers, record_routing=self.record_routing, routing_type=self.routing_type)
-            self.ln_post_s = copy.deepcopy(self.ln_post)
 
-        if self.add_temporal_model and self.vil:
+        if self.add_temporal_model:
             self.temporal_model = torch.hub.load("nx-ai/vision-lstm", "vil2-base")
             self.temporal_model.patch_embed = torch.nn.Identity()
             self.temporal_model.pos_embed = torch.nn.Identity()
             self.temporal_model.head = torch.nn.Linear(1536, 768)
-        elif self.add_temporal_model:
-            self.temporal_model = copy.deepcopy(self.transformer)
-            self.ln_post_t = copy.deepcopy(self.ln_post)
 
         self.tuned_model = True
+        self.transformer.construct_kiclip_components()
 
         print("Add spatial model:", self.add_spatial_model, "|", "Add temporal model:", self.add_temporal_model, "|", "Model Type is ViL:", self.vil)
 
@@ -251,9 +264,9 @@ class TemporalVisionTransformer(nn.Module):
         x_temporized = x_temporized.reshape(bT//self.T * self.T, p, d) # Shape [b*T, 196, 768]
 
         return x_temporized
-        
+    
     def forward(self, x):
-        s_x, temp_x = None, None
+        s_x, t_x = None, None
 
         x, [maskf, mask] = x
         x = self.conv1(x) #[b*T, 768, 14, 14]
@@ -261,22 +274,16 @@ class TemporalVisionTransformer(nn.Module):
         x = x.permute(0, 2, 1).contiguous()  # [b*T, 196, 768]
 
         if self.add_spatial_model and self.tuned_model:
-            if not self.vil:
-                s_x = self.spatial_model(x.permute(1, 0, 2))
-            else:
-                s_x = self.spatial_model(x)
-            if not self.vil:
-                s_x = s_x.permute(1, 0, 2)  # [b*T, 196, 768]
-                s_x = self.ln_post_s(s_x[:, 0, :]) #[b*T, 196, 768] -> taking CLS token -> [b*T, 768]
+            s_x = self.spatial_model(x)
 
         if self.add_temporal_model and self.tuned_model:
             if not self.vil:
-                temp_x = self.temporal_model(self.temporize_patches(x).permute(1, 0, 2))
+                t_x = self.temporal_model(self.temporize_patches(x).permute(1, 0, 2))
             else:
-                temp_x = self.temporal_model(self.temporize_patches(x))
+                t_x = self.temporal_model(self.temporize_patches(x))
             if not self.vil:
-                temp_x = temp_x.permute(1, 0, 2)  # [b*T, 196, 768]
-                temp_x = self.ln_post_t(temp_x[:, 0, :]) #[b*T, 196, 768] -> taking CLS token -> [b*T, 768]
+                t_x = t_x.permute(1, 0, 2)  # [b*T, 196, 768]
+                t_x = self.ln_post_t(t_x[:, 0, :]) #[b*T, 196, 768] -> taking CLS token -> [b*T, 768]
 
         # TSTransformer
         cls_token = self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device) #[b*T, 1, 768]
@@ -286,19 +293,20 @@ class TemporalVisionTransformer(nn.Module):
 
         x = x.permute(1, 0, 2)  # [197, b*T, 768]
         x = self.transformer(x) # [197, b*T, 768]
-        ts_x = x.permute(1, 0, 2)  # [b*T, 197, 768]
-        ts_x = self.ln_post(ts_x[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
+        ta_x = x.permute(1, 0, 2)  # [b*T, 197, 768]
+        ta_x = self.ln_post(ta_x[:, 0, :]) #[b*T, 197, 768] -> taking CLS token -> [b*T, 768]
 
         if self.add_spatial_model and self.add_temporal_model and self.tuned_model:
-            x = (ts_x + s_x + temp_x)/3
+            x = (ta_x + s_x + t_x)/3
         elif self.add_spatial_model and self.tuned_model:
-            x = (ts_x + s_x)/2
+            x = (ta_x + s_x)/2
         elif self.add_temporal_model and self.tuned_model:
-            x = (ts_x + temp_x)/2
+            x = (ta_x + t_x)/2
         else:
-            x = ts_x
+            x = ta_x
 
         if self.proj is not None:
-            x = x @ self.proj #[b*T, num_classes]
-        
-        return [x, ts_x]
+            x = x @ self.proj #[b*T, 512]
+
+        return [x, ta_x]
+

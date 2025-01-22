@@ -12,7 +12,7 @@ import utils.checkpoint as cu
 from utils.meters import AVAMeter, EpochTimer, TrainMeter, ValMeter
 from config.defaults import assert_and_infer_cfg
 from models.temporalclip_video_model import TemporalClipVideo
-from models.scar import SCAR
+from models.kiclip import KICLIP
 import models.losses as losses
 from datasets import utils
 from datasets.build import build_dataset
@@ -120,6 +120,7 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
     data_size = len(loader)
 
     loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(reduction="mean")
+    loss_fun_ce = losses.get_loss_func("cross_entropy")(reduction="mean")
     if cfg.MODEL.KEEP_RAW_MODEL:
         raw_clip_params = {}
         for n, p in model.named_parameters():
@@ -165,7 +166,7 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
         optim.set_lr(optimizer, lr)
         train_meter.data_toc()
 
-        # optimizer.zero_grad()
+        preds, res_clf = None, None
         if cfg.DEVICE == 'mps':
             with torch.cuda.amp.autocast(enabled=cfg.TRAIN.MIXED_PRECISION):
                 optimizer.zero_grad()
@@ -175,15 +176,16 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
 
         if cfg.MODEL.KEEP_RAW_MODEL and cfg.MODEL.RAW_MODEL_DISTILLATION:
             outputs = model(inputs)
+
             if len(outputs[0]) == 2:
-                [preds, img_encode], [raw_pred, raw_img_encode] = outputs
+                [preds, img_encode], [raw_pred, raw_img_encode], res_clf = outputs
             elif len(outputs[0]) == 3:
-                [preds, img_encode, text_encode], [raw_pred, raw_img_encode, raw_text_encode] = outputs
+                [preds, img_encode, text_encode], [raw_pred, raw_img_encode, raw_text_encode], res_clf = outputs
         else:
             preds = model(inputs)
             if isinstance(preds, list):
                 preds = preds[0]
-
+    
         loss = loss_fun(preds, labels)
         if cfg.MODEL.KEEP_RAW_MODEL and cfg.MODEL.RAW_MODEL_DISTILLATION:
             distillation_loss_1 =  1 - F.cosine_similarity(img_encode, raw_img_encode, dim=-1).mean()
@@ -195,7 +197,8 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
             #     logger('Distillation Loss Ratio: %f'%cfg.MODEL.DISTILLATION_RATIO)
 
             loss += cfg.MODEL.DISTILLATION_RATIO * distillation_loss
-
+            loss += loss_fun_ce(res_clf, labels)
+        
         loss_extra = None
         if isinstance(loss, (list, tuple)):
             loss, loss_extra = loss
@@ -204,12 +207,6 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
         scaler.scale(loss).backward()
 
         scaler.unscale_(optimizer)
-
-        # for name, param in model.model.visual.tempx_blocks.named_parameters():
-        #     if param.grad is not None:
-        #         print(f"{name}: {param.grad.norm():.4f}")
-        #     else:
-        #         print(f"{name}: No gradient")
 
         if cfg.SOLVER.CLIP_GRAD_VAL:
             grad_norm = torch.nn.utils.clip_grad_value_(
@@ -423,12 +420,22 @@ def train():
     model = None
     if cfg.MODEL.MODEL_NAME == "TemporalClipVideo":
         model = TemporalClipVideo(cfg).to(cfg.DEVICE)
+    elif cfg.MODEL.MODEL_NAME == "KICLIP":
+        cfg.MODEL.VIL = False
+        cfg.MODEL.ADD_SPATIAL_MODEL = False
+        cfg.MODEL.ADD_TEMPORAL_MODEL = False
+        model = KICLIP(cfg).to(cfg.DEVICE)
     else:
         model_config = cfg.MODEL.MODEL_NAME.split("_")[1]
         cfg.MODEL.VIL = len(model_config) == 2
         cfg.MODEL.ADD_SPATIAL_MODEL = model_config[0] in ["X", "S"]
         cfg.MODEL.ADD_TEMPORAL_MODEL = model_config[0] in ["X", "T"]
-        model = SCAR(cfg).to(cfg.DEVICE)
+        model = KICLIP(cfg).to(cfg.DEVICE)
+
+    if cfg.NUM_GPUS > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs!")
+        model = torch.nn.DataParallel(model)
+        model = KICLIP(cfg).to("cuda:0")
 
     optimizer = construct_optimizer(model, cfg)
 
