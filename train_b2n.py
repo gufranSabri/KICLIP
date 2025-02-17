@@ -192,12 +192,8 @@ def train_epoch(loader, model, optimizer, scaler, cur_epoch, cfg, train_meter, l
             distillation_loss_2 =  1 - F.cosine_similarity(text_encode, raw_text_encode, dim=-1).mean()
             distillation_loss = distillation_loss_1 + distillation_loss_2
 
-            # if cur_iter % cfg.LOG_PERIOD == 0:
-            #     logger('Distillation Loss: %.8f'%distillation_loss.item())
-            #     logger('Distillation Loss Ratio: %f'%cfg.MODEL.DISTILLATION_RATIO)
-
             loss += cfg.MODEL.DISTILLATION_RATIO * distillation_loss
-            loss += loss_fun_ce(res_clf, labels)
+            # loss += loss_fun_ce(res_clf, labels)
         
         loss_extra = None
         if isinstance(loss, (list, tuple)):
@@ -381,10 +377,10 @@ def eval_epoch(loader, model, cur_epoch, cfg, val_meter, logger):
 
 def train():
     args = parse_args()
-    date = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    date = "10"#datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-    # output_path = "_".join([args.opts[args.opts.index("OUTPUT_DIR")+1], date])
-    # args.opts[args.opts.index("OUTPUT_DIR")+1] = output_path
+    output_path = "_".join([args.opts[args.opts.index("OUTPUT_DIR")+1], date])
+    args.opts[args.opts.index("OUTPUT_DIR")+1] = output_path
 
     if os.path.exists(args.opts[args.opts.index("OUTPUT_DIR")+1]):
         shutil.rmtree(args.opts[args.opts.index("OUTPUT_DIR")+1])

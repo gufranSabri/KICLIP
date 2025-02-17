@@ -1,7 +1,7 @@
 ROOT=./
 CKPT=./basetraining/B2N_k400_KICLIP
-OUT_DIR=./basetraining/B2N_k400_scar/testing
-LOAD_CKPT_FILE=./basetraining/B2N_k400_scar/wa_checkpoints/swa_2_22.pth
+OUT_DIR=./basetraining/B2N_k400_KICLIP/testing
+LOAD_CKPT_FILE=./basetraining/B2N_k400_KICLIP/wa_checkpoints/swa_2_22.pth
 
 # TRAIN_FILE can be set as train_1.csv or train_2.csv or train_3.csv;
 # TEST_FILE can be set as val_new.csv (base set) or test.csv (novel set).

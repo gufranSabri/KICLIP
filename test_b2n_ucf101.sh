@@ -1,7 +1,7 @@
 ROOT=./
-CKPT=./basetraining/B2N_ucf101_KICLIP
-OUT_DIR=./basetraining/B2N_ucf101_KICLIP/testing
-LOAD_CKPT_FILE=./basetraining/B2N_ucf101_KICLIP/wa_checkpoints/swa_2_22.pth
+CKPT=./basetraining/B2N_ucf101_KICLIP_10
+OUT_DIR=./basetraining/B2N_ucf101_KICLIP_10/testing
+LOAD_CKPT_FILE=./basetraining/B2N_ucf101_KICLIP_10/wa_checkpoints/swa_2_22.pth
 
 # TEST_FILE can be set as val.csv (base set) or test.csv (novel set).
 # rephrased_file can be set as train_rephrased.json (base set) or test_rephrased.json (novel set)
@@ -14,7 +14,7 @@ NUM_CLASSES=50
 
 cd $ROOT
 
-CUDA_VISIBLE_DEVICES=0 python3 test_b2n.py \
+CUDA_VISIBLE_DEVICES=1 python3 test_b2n.py \
     --cfg ./config_files/Kinetics/KICLIP_vitb16_8x16_STAdapter_UCF101.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_ucf101 \
     TRAIN_FILE $TRAIN_FILE \
@@ -46,7 +46,7 @@ NUM_CLASSES=51
 
 cd $ROOT
 
-CUDA_VISIBLE_DEVICES=0 python3 test_b2n.py \
+CUDA_VISIBLE_DEVICES=1 python3 test_b2n.py \
     --cfg ./config_files/Kinetics/KICLIP_vitb16_8x16_STAdapter_UCF101.yaml \
     --opts DATA.PATH_TO_DATA_DIR ./zs_label_db/B2N_ucf101 \
     TRAIN_FILE $TRAIN_FILE \

@@ -3,8 +3,8 @@ import os
 from pprint import pprint
 
 raw_clip = '/home/g202302610/.cache/clip/ViT-B-16.pt'
-source_dir = './basetraining/B2N_hmdb51_KICLIP/checkpoints'
-output_dir = './basetraining/B2N_hmdb51_KICLIP/wa_checkpoints'
+source_dir = './basetraining/B2N_ucf101_KICLIP_10/checkpoints'
+output_dir = './basetraining/B2N_ucf101_KICLIP_10/wa_checkpoints'
 
 wa_start = 2
 wa_end = 22

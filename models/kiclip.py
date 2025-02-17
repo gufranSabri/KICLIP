@@ -30,8 +30,10 @@ class KICLIP(nn.Module):
         for k, v in self.model.named_parameters():
             v.requires_grad = True
 
-        for k, v in self.model.visual.transformer.resblocks_f.named_parameters():
-            v.requires_grad = False
+        for k, v in self.model.visual.transformer.named_parameters():
+            if "resblocks_f" in k:
+                print("FREEZING", k)
+                v.requires_grad = False
 
         self.text_dict = self.text_prompt(os.path.join(cfg.DATA.INDEX_LABEL_MAPPING_FILE))
         if not cfg.TEST.OPENSET: self.text_dict = self.text_prompt(os.path.join(cfg.DATA.INDEX_LABEL_MAPPING_FILE))

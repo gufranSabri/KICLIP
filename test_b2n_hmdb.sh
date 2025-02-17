@@ -1,7 +1,7 @@
 ROOT=./
-CKPT=./basetraining/B2N_hmdb51_KICLIP
-OUT_DIR=./basetraining/B2N_hmdb51_KICLIP/testing
-LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_KICLIP/wa_checkpoints/swa_2_22.pth
+CKPT=./basetraining/B2N_hmdb51_KICLIP_01
+OUT_DIR=./basetraining/B2N_hmdb51_KICLIP_01/testing
+LOAD_CKPT_FILE=./basetraining/B2N_hmdb51_KICLIP_01/wa_checkpoints/swa_2_22.pth
 
 # TEST_FILE can be set as val.csv (base set) or test.csv (novel set).
 # rephrased_file can be set as train_rephrased.json (base set) or test_rephrased.json (novel set)

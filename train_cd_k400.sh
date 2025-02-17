@@ -7,7 +7,7 @@ TRAIN_FILE=train.csv
 VAL_FILE=val.csv
 TEST_FILE=test.csv
 
-CUDA_VISIBLE_DEVICES=0 python3 train_b2n.py \
+CUDA_VISIBLE_DEVICES=1 python3 train_b2n.py \
   --cfg config_files/Kinetics/KICLIP_vitb16_8x16_STAdapter_K400.yaml \
   --opts DATA.PATH_TO_DATA_DIR ./label_db/weng_compress_full_splits \
   DATA.PATH_PREFIX /data/Hamzah/kinetics-400/raw/kinetics-dataset/k400 \
