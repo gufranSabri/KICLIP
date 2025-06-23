@@ -1,8 +1,13 @@
 # KICLIP: Knowledge Injection Improves Distillation
 
 <!-- pdf based image -->
+![KICLIP](./fig/heatmap_comp.png)
 
-![KICLIP](./fig/KICLIP.png)
+<strong>Figure 1</strong>: EigenCAM comparison between the model without Knowledge Injection (top row) and with Knowledge Injection (bottom row). The injected
+knowledge helps the student model better align with the teacher’s internal representations, as evident from the improved feature structure. Visualizations are
+shown for every transformer layer after the 5th layer in ViT-B/16. Red areas indicate most-attended regions. This figure qualitatively illustrates the effect of Knowledge Injection on internal feature representations. The EigenCAM comparison shows that intermediate knowledge injection clearly improves the model’s ability to attend to the subject in the frame. Without Knowledge Injection, the model struggles to focus on the subject even by the 10th layer. In contrast, when Knowledge Injection is used, the model begins attending to the subject as early as the 7th layer. Furthermore, in the final layer, the attention is noticeably more focused and structured around the subject, indicating better alignment with the teacher model.
+
+<!-- ![KICLIP](./fig/KICLIP.png) -->
 
 ## How to Use
 
@@ -81,7 +86,7 @@ ROOT PROJECT DIRECTORY
 
 #### Cross Dataset Setting
 
-1. `bash train_cd_k400.sh`
+Released soon...
 
 ## Evaluation
 
@@ -98,4 +103,4 @@ Run the test scripts. Make sure to change the directories according to the exper
 
 #### Cross Dataset Setting
 
-TBA
+Released soon...

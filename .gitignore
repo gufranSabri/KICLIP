@@ -1,2 +1,4 @@
 /data/*
 /basetraining/*
+/overlays/*
+train_cd_k400.sh
