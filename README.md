@@ -75,7 +75,6 @@ ROOT PROJECT DIRECTORY
 
 ## Training
 
-<p style="font-weight:bold; color:red">The following scripts can be used for training for the base to novel setting.</p>
 <p style="font-weight:bold; color:red">Please inspect the scripts to change the paths according to the arrangements on your system.</p>
 
 #### Base To Novel Setting
