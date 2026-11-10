@@ -1,0 +1,4 @@
+# cross-dataset: all 400 K400 classes, zero-shot on UCF101, HMDB51 (full + 3 splits) and K600 (3 splits of 160 novel classes)
+data:
+  train: cross/k400/train
+  val: cross/k400/val

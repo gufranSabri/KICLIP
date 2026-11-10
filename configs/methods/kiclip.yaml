@@ -1,0 +1,4 @@
+# KICLIP: FROSTER + knowledge injection + aux classifier
+model:
+  inject: true
+  aux_weight: 1.0

@@ -1,0 +1,10 @@
+# base-to-novel HMDB51: 16 shots of 26 base classes, 25 novel
+data:
+  train: b2n/hmdb51/train_s1
+  val: b2n/hmdb51/base
+  test: [b2n/hmdb51/base, b2n/hmdb51/novel]
+
+train:
+  epochs: 12
+  batch_size: 32
+  eval_every: 1

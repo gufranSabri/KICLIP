@@ -1,0 +1,42 @@
+# run outputs, SLURM logs, generated tables and figures
+/runs/
+/slurm/
+/docs/tables/
+/docs/figures/
+
+# upstream FROSTER / KICLIP code, kept for reference only
+/reference/
+
+# videos, checkpoints and logs live outside the repo (data_root, runs_root)
+/data/
+*.mp4
+*.avi
+*.mkv
+*.webm
+*.pt
+*.pth
+*.pyth
+*.safetensors
+*.log
+nohup.out
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+
+# editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude Code
+.claude/
+CLAUDE.md

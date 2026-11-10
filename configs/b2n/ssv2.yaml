@@ -1,0 +1,11 @@
+# base-to-novel SSv2: 16 shots of 87 base classes, 87 novel; seeds train_s1..s3
+data:
+  train: b2n/ssv2/train_s1
+  val: b2n/ssv2/base
+  test: [b2n/ssv2/base, b2n/ssv2/novel]
+
+train:
+  epochs: 12
+  batch_size: 32
+  average_from: 12 # FROSTER reports SSv2 from the last epoch, without averaging
+  eval_every: 1

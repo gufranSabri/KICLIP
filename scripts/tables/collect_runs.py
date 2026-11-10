@@ -1,0 +1,67 @@
+# A run's identity comes from its own config.json (data.train), never its directory name.
+
+from __future__ import annotations
+
+import json
+import statistics
+from pathlib import Path
+
+
+def load_runs(runs_root: Path) -> list[dict]:
+    runs = []
+    for run_dir in sorted(p for p in runs_root.iterdir() if p.is_dir()):
+        cfg_path = run_dir / "config.json"
+        if not cfg_path.exists():
+            continue
+        try:
+            cfg = json.loads(cfg_path.read_text())
+        except json.JSONDecodeError:
+            continue
+
+        tests = {}
+        for f in sorted(run_dir.glob("test_*.json")):
+            try:
+                payload = json.loads(f.read_text())
+            except json.JSONDecodeError:
+                continue
+            tests[payload["split"]] = payload["metrics"]
+
+        runs.append({
+            "run": run_dir.name,
+            "train": cfg["data"]["train"],
+            "arch": cfg["model"]["arch"],
+            "method": method(cfg),
+            "done": (run_dir / "averaged.pt").exists(),
+            "tests": tests,
+        })
+    return runs
+
+
+METHODS = ("kiclip", "kiclip_no_aux", "kiclip_no_injection", "froster")
+METHOD_PRETTY = {
+    "kiclip": "KICLIP",
+    "kiclip_no_aux": "KICLIP − aux",
+    "kiclip_no_injection": "KICLIP − injection",
+    "froster": "FROSTER",
+}
+
+
+def method(cfg: dict) -> str:
+    m = cfg["model"]
+    inject, aux = m.get("inject", False), m.get("aux_weight", 0.0) > 0
+    return {
+        (True, True): "kiclip", (True, False): "kiclip_no_aux",
+        (False, True): "kiclip_no_injection", (False, False): "froster",
+    }[(inject, aux)]
+
+
+def mean_std(values: list[float]) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    return statistics.mean(values), statistics.stdev(values) if len(values) > 1 else 0.0
+
+
+def fmt(x: float | None, std: float | None = None) -> str:
+    if x is None:
+        return "-"
+    return f"{x:.1f}" if std is None else f"{x:.1f} ± {std:.1f}"

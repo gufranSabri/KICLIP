@@ -1,0 +1,58 @@
+# KICLIP defaults: ViT-B/16, 8x16 clips, the cross-dataset setting (all of K400 -> UCF101 / HMDB51 / K600).
+# configs/methods/*.yaml switch the KICLIP components off (froster.yaml = the FROSTER baseline).
+
+model:
+  arch: ViT-B-16 # ViT-B-32 | ViT-B-16 | ViT-L-14 (OpenAI weights, fetched by open_clip from the HF Hub)
+  temporal: expand # each frame also attends to its neighbours' keys/values; null = frame-wise CLIP
+  inject: true # knowledge injection: average in a frozen pretrained branch before every vision block
+  distill_weight: 2.0 # 0 drops the frozen teacher and the projectors
+  residual_alpha: 0.1
+  aux_weight: 1.0 # cross-entropy weight of the aux classifier on the projected video features; 0 drops it
+  grad_checkpointing: false
+
+data:
+  train: cross/k400/train # <splits_root>/<protocol>/<dataset>/<set>.csv, videos under <data_root>/<dataset>
+  val: cross/k400/val
+  test:
+    - cross/ucf101/full
+    - cross/ucf101/split1
+    - cross/ucf101/split2
+    - cross/ucf101/split3
+    - cross/hmdb51/full
+    - cross/hmdb51/split1
+    - cross/hmdb51/split2
+    - cross/hmdb51/split3
+    - cross/k600/split1
+    - cross/k600/split2
+    - cross/k600/split3
+  num_frames: 8
+  sampling_rate: 16 # frames between samples at target_fps
+  target_fps: 30.0
+  train_scales: [224, 256] # short-side jitter; testing resizes to the first
+  crop_size: 224
+  flip: true
+  num_workers: 8
+
+train:
+  epochs: 22
+  batch_size: 64 # global, the paper's 8 GPUs x 8
+  micro_batch_size: 8 # per GPU per forward; batch_size is reached by gradient accumulation
+  lr: 3.33e-6
+  warmup_epochs: 2.0
+  warmup_start_lr: 3.33e-8
+  end_lr: 3.33e-8
+  weight_decay: 0.01
+  grad_clip: 1.0
+  amp: true
+  average_from: 2 # averaged.pt = mean of the weights after epochs average_from..epochs
+  eval_every: 0 # epochs between val passes, 0 = never
+  seed: 0
+
+test:
+  views: 3 # evenly spaced clips per video, logits summed
+  batch_size: 8
+  amp: true
+
+data_root: ~/scratch/ahmedubc/KICLIP-data
+splits_root: splits
+runs_root: runs

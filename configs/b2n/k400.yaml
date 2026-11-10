@@ -1,0 +1,10 @@
+# base-to-novel K400: 16 shots of 200 base classes; seeds train_s1..s3
+data:
+  train: b2n/k400/train_s1
+  val: b2n/k400/base
+  test: [b2n/k400/base, b2n/k400/novel]
+
+train:
+  epochs: 12
+  batch_size: 32
+  eval_every: 1

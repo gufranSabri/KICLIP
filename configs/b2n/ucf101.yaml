@@ -1,0 +1,10 @@
+# base-to-novel UCF101: 16 shots of 51 base classes, 50 novel
+data:
+  train: b2n/ucf101/train_s1
+  val: b2n/ucf101/base
+  test: [b2n/ucf101/base, b2n/ucf101/novel]
+
+train:
+  epochs: 12
+  batch_size: 64
+  eval_every: 1
