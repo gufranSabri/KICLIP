@@ -1,13 +1,13 @@
 # KICLIP defaults: ViT-B/16, 8x16 clips, the cross-dataset setting (all of K400 -> UCF101 / HMDB51 / K600).
-# configs/methods/*.yaml switch the KICLIP components off (froster.yaml = the FROSTER baseline).
+# configs/methods/froster.yaml switches knowledge injection off (FROSTER); kiclip_blocks.yaml is the original KICLIP.
 
 model:
   arch: ViT-B-16 # ViT-B-32 | ViT-B-16 | ViT-L-14 (OpenAI weights, fetched by open_clip from the HF Hub)
   temporal: expand # each frame also attends to its neighbours' keys/values; null = frame-wise CLIP
-  inject: true # knowledge injection: average in a frozen pretrained branch before every vision block
-  distill_weight: 2.0 # 0 drops the frozen teacher and the projectors
+  inject: true # knowledge injection: average a frozen pretrained stream into the student before every vision block
+  inject_source: teacher # teacher: the frozen teacher's activations | blocks: frozen block copies on the student's stem
+  distill_weight: 2.0 # 0 drops the distillation loss and the projectors
   residual_alpha: 0.1
-  aux_weight: 1.0 # cross-entropy weight of the aux classifier on the projected video features; 0 drops it
   grad_checkpointing: false
 
 data:

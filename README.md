@@ -2,16 +2,15 @@
 
 **Knowledge Injection Improves Distillation: open-vocabulary action recognition built on FROSTER (ICLR 2024).**
 
-A student CLIP is fine-tuned on videos while it is kept close to the original CLIP in three ways:
+A student CLIP is fine-tuned on videos while it is kept close to the original CLIP in two ways:
 
 1. **Distillation (FROSTER)**: residual projectors on the student's frame and class features (`x + 0.1 * MLP(x)`)
    are pulled to a frozen CLIP teacher's with a cosine loss, weighted by `model.distill_weight`.
-2. **Knowledge injection (KICLIP)**: a frozen copy of the pretrained vision blocks runs next to the student's,
-   fed the same patch tokens. Before every student block its tokens are averaged with the frozen branch's tokens
-   at the same depth (`model.inject`). It is active at test time too.
-3. **Aux classifier (KICLIP)**: a closed-set classifier on the frame-averaged projected video features
-   (Linear 512→768, GELU, torchvision's pretrained ImageNet ViT-B/16 head, GELU, Linear 1000→C), trained with
-   cross-entropy weighted by `model.aux_weight`. Training only.
+2. **Knowledge injection (KICLIP)**: before every student vision block, its tokens are averaged with the frozen
+   teacher's tokens at the same depth (`model.inject`). The teacher's forward pass is shared with distillation, so
+   injection costs no extra compute in training. It is active at test time too. The original KICLIP instead ran
+   frozen copies of the blocks on the student's own stem and backpropagated through them
+   (`model.inject_source: blocks`, about 1.36x the training FLOPs).
 
 The student's vision attention also reads the keys/values of each frame's neighbours (`model.temporal: expand`),
 class embeddings come from an ensemble of templated GPT-rephrased descriptions, and `averaged.pt` is the mean of
@@ -23,14 +22,14 @@ the weights after epochs `train.average_from..train.epochs`.
 kiclip.py              CLI: train / test
 kiclip.slurm           batch job running every experiment for $METHODS, then the tables
 src/models/clip.py     OpenAI CLIP as plain modules (names match the checkpoints), temporal attention, injection
-src/models/kiclip.py   student wrapper: projectors, aux classifier, distillation loss
+src/models/kiclip.py   student wrapper: frozen teacher (injection + distillation), projectors, distillation loss
 src/eigencam.py        EigenCAM over the vision blocks
 src/data/              PyAV decoding, clip sampling and transforms, prompt templates
 src/train.py           training loop (AMP, gradient accumulation, DDP, resume, online weight averaging)
 src/test.py            multi-view evaluation
 configs/               default.yaml (KICLIP), one yaml per (protocol, dataset), methods/*.yaml overlays
 splits/                FROSTER's split CSVs and class-description JSONs
-scripts/               install.sh, troubleshooting.sh, data/ (download + link), experiments/*.sh, tables/*.py,
+scripts/               install.sh, troubleshooting.sh, data/ (download + organize), experiments/*.sh, tables/*.py,
                        figures/eigencam.py
 ```
 
@@ -41,8 +40,8 @@ bash scripts/install.sh
 ```
 
 Everything is a pip wheel (on Compute Canada, from the local wheelhouse): no git installs, no SlowFast, detectron2,
-pytorchvideo or fvcore. The OpenAI CLIP weights come from the HF Hub through `open_clip` (into `$HF_HOME`), and the
-aux classifier's ImageNet head from torchvision (into `$TORCH_HOME`), the first time they are needed.
+pytorchvideo or fvcore. The OpenAI CLIP weights come from the HF Hub through `open_clip` (into `$HF_HOME`) the first
+time they are needed.
 
 ## Data
 
@@ -93,14 +92,15 @@ A split is `<protocol>/<dataset>/<set>`, i.e. `splits/<protocol>/<dataset>/<set>
 
 ## Methods
 
-`configs/default.yaml` is full KICLIP. Stack a method overlay after the dataset config to switch parts off:
+`configs/default.yaml` is KICLIP. Stack a method overlay after the dataset config to pick the method explicitly:
 
-| Overlay | `model.inject` | `model.aux_weight` |
+| Overlay | `model.inject` | `model.inject_source` |
 |---|---|---|
-| `configs/methods/kiclip.yaml` | true | 1.0 |
-| `configs/methods/kiclip_no_aux.yaml` | true | 0 |
-| `configs/methods/kiclip_no_injection.yaml` | false | 1.0 |
-| `configs/methods/froster.yaml` | false | 0 |
+| `configs/methods/kiclip.yaml` | true | `teacher` |
+| `configs/methods/kiclip_blocks.yaml` (original KICLIP) | true | `blocks` |
+| `configs/methods/froster.yaml` | false | - |
+
+Checkpoints hold the student only; the teacher is rebuilt from the pretrained weights.
 
 ## Usage
 
@@ -114,8 +114,8 @@ python kiclip.py --config configs/cross/k400.yaml test --checkpoint runs/cross_k
 
 `--config` can be repeated (later files win) and `--set key=value` overrides any key, on either side of the
 subcommand. `test` evaluates `data.test` unless `--splits` is given and writes `test_<split>.json` next to the
-checkpoint. It also loads the original FROSTER and KICLIP releases (`swa_2_22.pth`); a checkpoint with injection
-blocks needs `model.inject: true` and one without needs `false`, which `test` checks.
+checkpoint. It also loads the original FROSTER and KICLIP releases (`swa_2_22.pth`, the latter with
+`configs/methods/kiclip_blocks.yaml`). `test` checks that the config injects the way the checkpoint was trained.
 
 Multi-GPU runs go through `torchrun`; `train.batch_size` is global, so the paper's batch is kept on any GPU count by
 gradient accumulation (`train.micro_batch_size` per GPU per forward):

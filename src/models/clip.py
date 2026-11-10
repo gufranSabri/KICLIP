@@ -121,14 +121,23 @@ class Transformer(nn.Module):
             return checkpoint(block, x, use_reentrant=False)
         return block(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (N, L, D)
-        frozen = x
+    def forward(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> torch.Tensor:  # (N, L, D)
+        # frozen: another model's input to every block (see trace), averaged in before the block like resblocks_f's
+        t = x
         for i, block in enumerate(self.resblocks):
             if self.resblocks_f is not None:
-                x = (x + frozen) / 2
-                frozen = self._run(self.resblocks_f[i], frozen)
+                x, t = (x + t) / 2, self._run(self.resblocks_f[i], t)
+            elif frozen is not None:
+                x = (x + frozen[i]) / 2
             x = self._run(block, x)
         return x
+
+    def trace(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:  # output and every block's input
+        inputs = []
+        for block in self.resblocks:
+            inputs.append(x)
+            x = self._run(block, x)
+        return x, inputs
 
 
 class VisionTransformer(nn.Module):
@@ -159,7 +168,7 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (N, 3, R, R) -> (N, D)
+    def embed(self, x: torch.Tensor) -> torch.Tensor:  # (N, 3, R, R) -> (N, 1 + P, W), the first block's input
         if x.shape[-2:] != (self.resolution, self.resolution):
             raise ValueError(
                 f"expected {self.resolution}px frames, got {tuple(x.shape[-2:])}; set data.crop_size={self.resolution}"
@@ -167,8 +176,17 @@ class VisionTransformer(nn.Module):
         x = self.conv1(x).flatten(2).transpose(1, 2)                       # (N, P, W)
         cls = self.class_embedding.to(x.dtype).expand(x.shape[0], 1, -1)
         x = torch.cat([cls, x], 1) + self.positional_embedding.to(x.dtype)  # (N, 1 + P, W)
-        x = self.transformer(self.ln_pre(x))
+        return self.ln_pre(x)
+
+    def head(self, x: torch.Tensor) -> torch.Tensor:  # (N, 1 + P, W) -> (N, D)
         return self.ln_post(x[:, 0]) @ self.proj
+
+    def forward(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> torch.Tensor:  # -> (N, D)
+        return self.head(self.transformer(self.embed(x), frozen))
+
+    def trace(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:  # (N, D) and every block's input
+        x, inputs = self.transformer.trace(self.embed(x))
+        return self.head(x), inputs
 
 
 class CLIP(nn.Module):

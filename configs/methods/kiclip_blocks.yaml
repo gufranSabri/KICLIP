@@ -1,0 +1,4 @@
+# original KICLIP: knowledge injection from frozen copies of the vision blocks, run on the student's stem
+model:
+  inject: true
+  inject_source: blocks

@@ -12,6 +12,7 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
 VALID_ARCHS = ("ViT-B-32", "ViT-B-16", "ViT-L-14")
 VALID_TEMPORAL = ("expand",)
+VALID_INJECT_SOURCES = ("teacher", "blocks")
 CROSS_TEST = (
     "cross/ucf101/full", "cross/ucf101/split1", "cross/ucf101/split2", "cross/ucf101/split3",
     "cross/hmdb51/full", "cross/hmdb51/split1", "cross/hmdb51/split2", "cross/hmdb51/split3",
@@ -24,9 +25,9 @@ class ModelConfig:
     arch: str = "ViT-B-16"
     temporal: str | None = "expand"
     inject: bool = True
+    inject_source: str = "teacher"
     distill_weight: float = 2.0
     residual_alpha: float = 0.1
-    aux_weight: float = 1.0
     grad_checkpointing: bool = False
 
 
@@ -108,12 +109,12 @@ class Config:
             raise ValueError(f"model.arch must be one of {VALID_ARCHS}, got {m.arch!r}")
         if m.temporal is not None and m.temporal not in VALID_TEMPORAL:
             raise ValueError(f"model.temporal must be one of {VALID_TEMPORAL} or null, got {m.temporal!r}")
+        if m.inject_source not in VALID_INJECT_SOURCES:
+            raise ValueError(f"model.inject_source must be one of {VALID_INJECT_SOURCES}, got {m.inject_source!r}")
         if m.distill_weight < 0:
             raise ValueError("model.distill_weight must be >= 0")
         if m.residual_alpha < 0:
             raise ValueError("model.residual_alpha must be >= 0")
-        if m.aux_weight < 0:
-            raise ValueError("model.aux_weight must be >= 0")
 
         self.check_split(d.train, "data.train")
         if d.val is not None:

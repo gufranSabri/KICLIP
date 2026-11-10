@@ -37,22 +37,15 @@ def load_runs(runs_root: Path) -> list[dict]:
     return runs
 
 
-METHODS = ("kiclip", "kiclip_no_aux", "kiclip_no_injection", "froster")
-METHOD_PRETTY = {
-    "kiclip": "KICLIP",
-    "kiclip_no_aux": "KICLIP − aux",
-    "kiclip_no_injection": "KICLIP − injection",
-    "froster": "FROSTER",
-}
+METHODS = ("kiclip", "kiclip_blocks", "froster")
+METHOD_PRETTY = {"kiclip": "KICLIP", "kiclip_blocks": "KICLIP (blocks)", "froster": "FROSTER"}
 
 
 def method(cfg: dict) -> str:
-    m = cfg["model"]
-    inject, aux = m.get("inject", False), m.get("aux_weight", 0.0) > 0
-    return {
-        (True, True): "kiclip", (True, False): "kiclip_no_aux",
-        (False, True): "kiclip_no_injection", (False, False): "froster",
-    }[(inject, aux)]
+    # configs from before model.inject_source injected from frozen block copies
+    if not cfg["model"].get("inject", False):
+        return "froster"
+    return "kiclip" if cfg["model"].get("inject_source", "blocks") == "teacher" else "kiclip_blocks"
 
 
 def mean_std(values: list[float]) -> tuple[float | None, float | None]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -11,22 +12,26 @@ import torch.nn.functional as F
 from src.config import Config
 from src.data.video import CLIP_MEAN, CLIP_STD, eval_transform, read_clips
 from src.models.clip import CLIP, has_injection, pretrained_state
+from src.models.kiclip import KICLIP, build_kiclip
 
 
-def load_vision_model(spec: str, cfg: Config) -> CLIP:
+def load_vision_model(spec: str, cfg: Config) -> KICLIP:
     # spec: "clip" for the pretrained (teacher) CLIP, else averaged.pt or an original FROSTER / KICLIP .pth
     if spec == "clip":
-        return CLIP.from_state_dict(pretrained_state(cfg.model.arch)).eval()
-    from src.test import load_weights
+        return KICLIP(CLIP.from_state_dict(pretrained_state(cfg.model.arch)), cfg.data.num_frames).eval()
+    from src.test import injection, load_weights
 
     weights, ckpt_cfg = load_weights(Path(spec))
-    temporal = ckpt_cfg["model"]["temporal"] if ckpt_cfg else cfg.model.temporal
-    num_frames = ckpt_cfg["data"]["num_frames"] if ckpt_cfg else cfg.data.num_frames
+    if ckpt_cfg is None:  # the original releases inject from frozen block copies, if at all
+        temporal, num_frames = cfg.model.temporal, cfg.data.num_frames
+        source = "blocks" if has_injection(weights) else None
+    else:
+        temporal, num_frames = ckpt_cfg["model"]["temporal"], ckpt_cfg["data"]["num_frames"]
+        source = injection(ckpt_cfg["model"])
     if num_frames != cfg.data.num_frames:
         raise ValueError(f"{spec} was trained on {num_frames}-frame clips; pass --set data.num_frames={num_frames}")
-    return CLIP.from_state_dict(
-        weights, temporal=temporal, num_frames=num_frames, inject=has_injection(weights)
-    ).eval()
+    model = replace(cfg.model, temporal=temporal, inject=source is not None, inject_source=source or "teacher")
+    return build_kiclip(replace(cfg, model=model), weights).eval()
 
 
 def load_clip(path: Path, cfg: Config, view: int) -> tuple[torch.Tensor, np.ndarray]:
@@ -39,14 +44,14 @@ def load_clip(path: Path, cfg: Config, view: int) -> tuple[torch.Tensor, np.ndar
 
 
 @torch.no_grad()
-def layer_tokens(clip: CLIP, frames: torch.Tensor) -> list[torch.Tensor]:  # (T, 3, R, R) -> per block (T, 1 + P, W)
+def layer_tokens(model: KICLIP, frames: torch.Tensor) -> list[torch.Tensor]:  # (T, 3, R, R) -> per block (T, 1 + P, W)
     outs: list[torch.Tensor] = []
     hooks = [
         block.register_forward_hook(lambda _m, _i, out: outs.append(out.float().cpu()))
-        for block in clip.visual.transformer.resblocks
+        for block in model.model.visual.transformer.resblocks
     ]
     try:
-        clip.encode_image(frames)
+        model.encode_video(frames)
     finally:
         for h in hooks:
             h.remove()

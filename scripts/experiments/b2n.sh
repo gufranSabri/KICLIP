@@ -2,7 +2,8 @@
 # Base-to-novel: for each method x dataset x seed on disk, train on the 16-shot base split, test on base and novel.
 #
 #   bash scripts/experiments/b2n.sh                                                    # RERUN=1 to retrain/retest
-#   METHODS="kiclip kiclip_no_aux kiclip_no_injection froster" bash scripts/experiments/b2n.sh
+#   METHODS=kiclip bash scripts/experiments/b2n.sh
+#   DATASETS=hmdb51 METHODS="kiclip kiclip_blocks froster" bash scripts/experiments/b2n.sh
 #   LAUNCH="torchrun --standalone --nproc_per_node=4" bash scripts/experiments/b2n.sh
 #   python scripts/tables/b2n.py
 
@@ -11,12 +12,7 @@ cd "$(dirname "$0")/../.." || exit 1
 RERUN=${RERUN:-0}
 LAUNCH=${LAUNCH:-python}
 read -ra METHODS <<< "${METHODS:-kiclip froster}"
-DATASETS=(
-    k400
-    hmdb51
-    ucf101
-    ssv2
-)
+read -ra DATASETS <<< "${DATASETS:-k400 hmdb51 ucf101 ssv2}"
 
 for METHOD in "${METHODS[@]}"; do
     for DS in "${DATASETS[@]}"; do

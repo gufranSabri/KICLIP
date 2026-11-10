@@ -22,7 +22,6 @@ source "$SLURM_TMPDIR/env/bin/activate"
 export PYTHONDONTWRITEBYTECODE=1
 export HF_HUB_DISABLE_XET=1
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
-export TORCH_HOME=/home/ahmedubc/scratch/torch_cache
 
 bash scripts/install.sh || exit 1
 

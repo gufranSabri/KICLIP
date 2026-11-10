@@ -1,4 +1,4 @@
-# KICLIP: FROSTER + knowledge injection + aux classifier
+# KICLIP: FROSTER + knowledge injection from the frozen teacher's activations
 model:
   inject: true
-  aux_weight: 1.0
+  inject_source: teacher

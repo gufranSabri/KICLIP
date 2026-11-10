@@ -5,13 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.config import Config
-from src.models.clip import CLIP, with_frozen_copy
+from src.models.clip import CLIP, pretrained_state, with_frozen_copy
 
 TEXT_CHUNK = 2048
-
-
-def frame_features(clip: CLIP, video: torch.Tensor) -> torch.Tensor:  # (..., T, 3, H, W) -> (frames, D), unit norm
-    return F.normalize(clip.encode_image(video.flatten(0, -4)), dim=-1)
 
 
 def class_features(clip: CLIP, tokens: torch.Tensor) -> torch.Tensor:  # (P, C, L) -> (C, D), averaged over prompts
@@ -42,61 +38,77 @@ def residual_projector(dim: int) -> nn.Sequential:
     return proj
 
 
-def aux_classifier(dim: int, num_classes: int) -> nn.Sequential:
-    from torchvision.models import ViT_B_16_Weights
-
-    # the middle layer is torchvision's ImageNet ViT-B/16 head, pretrained
-    state = ViT_B_16_Weights.IMAGENET1K_V1.get_state_dict(progress=False)
-    head = nn.Linear(768, 1000)
-    head.load_state_dict({"weight": state["heads.head.weight"], "bias": state["heads.head.bias"]})
-    return nn.Sequential(nn.Linear(dim, 768), nn.GELU(), head, nn.GELU(), nn.Linear(1000, num_classes))
-
-
 class KICLIP(nn.Module):
-    # the student CLIP, the projectors distilled towards the frozen teacher, and the closed-set aux classifier
+    # the student CLIP, the frozen pretrained CLIP (teacher) it is distilled towards and injected from, the projectors
 
     def __init__(
         self,
         model: CLIP,
         num_frames: int,
-        distill: bool = True,
+        teacher: CLIP | None = None,
+        inject: bool = False,
+        distill: bool = False,
         alpha: float = 0.1,
-        aux_classes: int | None = None,
     ):
         super().__init__()
-        self.model, self.num_frames, self.alpha = model, num_frames, alpha
+        if (inject or distill) and teacher is None:
+            raise ValueError("injecting from the teacher and distilling towards it need a teacher")
+        self.model, self.num_frames, self.inject, self.alpha = model, num_frames, inject, alpha
+        self.teacher = teacher.eval().requires_grad_(False) if teacher is not None else None
         self.projector_v = residual_projector(model.embed_dim) if distill else None
         self.projector_t = residual_projector(model.embed_dim) if distill else None
-        self.aux_classifier = aux_classifier(model.embed_dim, aux_classes) if aux_classes else None
 
-    def forward(self, video: torch.Tensor, tokens: torch.Tensor):
-        frames = frame_features(self.model, video)    # (B*T, D)
-        classes = class_features(self.model, tokens)  # (C, D)
+    # the teacher is the pretrained CLIP, rebuilt whenever a model is built, so checkpoints leave it out
+    def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
+        return {k: v for k, v in super().state_dict(*args, **kwargs).items() if not k.startswith("teacher.")}
+
+    def load_state_dict(self, state, strict: bool = True, assign: bool = False):
+        teacher = {k: v for k, v in super().state_dict().items() if k.startswith("teacher.")}
+        return super().load_state_dict({**teacher, **state}, strict, assign)
+
+    def encode_video(self, video: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # (..., T, 3, H, W) -> the student's and the teacher's frame features (frames, D), unit norm
+        x = video.flatten(0, -4)
+        stream = target = None
+        if self.teacher is not None:
+            with torch.no_grad():
+                target, stream = self.teacher.visual.trace(x)
+            target = F.normalize(target, dim=-1)
+        frames = self.model.visual(x, stream if self.inject else None)
+        return F.normalize(frames, dim=-1), target
+
+    def forward(self, video: torch.Tensor, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # -> logits (B, C) and the distillation loss
+        frames, teacher_frames = self.encode_video(video)  # (B*T, D)
+        classes = class_features(self.model, tokens)       # (C, D)
         logits = clip_logits(self.model, frames, classes, self.num_frames)
-        if self.projector_v is not None:
-            frames = frames + self.alpha * self.projector_v(frames)
-            classes = classes + self.alpha * self.projector_t(classes)
-        aux = None
-        if self.aux_classifier is not None:
-            aux = self.aux_classifier(frames.view(-1, self.num_frames, frames.shape[-1]).mean(1))  # (B, C_train)
         if self.projector_v is None:
-            return logits, None, None, aux
-        return logits, frames, classes, aux
+            return logits, torch.zeros((), device=logits.device)
+        with torch.no_grad():
+            teacher_classes = class_features(self.teacher, tokens)
+        return logits, distillation_loss(
+            frames + self.alpha * self.projector_v(frames),
+            classes + self.alpha * self.projector_t(classes),
+            teacher_frames,
+            teacher_classes,
+        )
 
 
-def build_kiclip(cfg: Config, state: dict[str, torch.Tensor], num_classes: int) -> KICLIP:
+def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None) -> KICLIP:
+    # weights: a trained student to evaluate; None builds a student to train, starting from the pretrained CLIP
     m = cfg.model
-    clip = CLIP.from_state_dict(
-        with_frozen_copy(state) if m.inject else state,
+    blocks = m.inject and m.inject_source == "blocks"
+    from_teacher = m.inject and m.inject_source == "teacher"
+    distill = weights is None and m.distill_weight > 0
+    pretrained = pretrained_state(m.arch) if weights is None or from_teacher else None
+    if weights is None:
+        weights = with_frozen_copy(pretrained) if blocks else pretrained
+    student = CLIP.from_state_dict(
+        weights,
         temporal=m.temporal,
         num_frames=cfg.data.num_frames,
-        inject=m.inject,
+        inject=blocks,
         grad_checkpointing=m.grad_checkpointing,
     )
-    return KICLIP(
-        clip,
-        cfg.data.num_frames,
-        distill=m.distill_weight > 0,
-        alpha=m.residual_alpha,
-        aux_classes=num_classes if m.aux_weight > 0 else None,
-    )
+    teacher = CLIP.from_state_dict(pretrained) if distill or from_teacher else None
+    return KICLIP(student, cfg.data.num_frames, teacher, inject=from_teacher, distill=distill, alpha=m.residual_alpha)

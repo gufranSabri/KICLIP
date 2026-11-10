@@ -1,4 +1,0 @@
-# KICLIP without the aux classifier
-model:
-  inject: true
-  aux_weight: 0.0

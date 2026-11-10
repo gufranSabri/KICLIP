@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader, Subset
 from src.config import Config
 from src.data.dataset import VideoDataset
 from src.data.prompts import tokenize
-from src.models.clip import CLIP, has_injection
-from src.models.kiclip import KICLIP, class_features, clip_logits, frame_features
+from src.models.clip import has_injection
+from src.models.kiclip import KICLIP, build_kiclip, class_features, clip_logits
 from src.utils import dist
 from src.utils.logger import get_logger
 from src.utils.metrics import format_metrics
@@ -43,7 +43,7 @@ def evaluate(model: KICLIP, dataset: VideoDataset, tokens: torch.Tensor, cfg: Co
         video, labels = video.to(device, non_blocking=True), labels.to(device)
         b, v = video.shape[:2]
         with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-            frames = frame_features(model.model, video)
+            frames = model.encode_video(video)[0]
             logits = clip_logits(model.model, frames, classes, model.num_frames).view(b, v, -1).sum(1)
         top = logits.topk(k, dim=-1).indices
         correct1 += (top[:, 0] == labels).sum().item()
@@ -64,10 +64,21 @@ def load_weights(path: Path) -> tuple[dict[str, torch.Tensor], dict | None]:
     return weights, ckpt.get("config")
 
 
+def injection(model: dict) -> str | None:
+    # a saved model config's injection source, None when off; configs from before inject_source used blocks
+    return model.get("inject_source", "blocks") if model["inject"] else None
+
+
 def _check_config(ckpt_cfg: dict | None, cfg: Config) -> None:
     if ckpt_cfg is None:
         logger.warning("checkpoint carries no config; evaluating with this config's model.temporal / data.num_frames")
         return
+    trained, now = injection(ckpt_cfg["model"]), injection(cfg.to_dict()["model"])
+    if trained != now:
+        raise ValueError(
+            f"checkpoint was trained with injection from {trained or 'nothing'}, this config injects from "
+            f"{now or 'nothing'}; stack the matching configs/methods/*.yaml"
+        )
     for section, key in (("model", "temporal"), ("data", "num_frames"), ("data", "sampling_rate")):
         trained, now = ckpt_cfg[section].get(key), getattr(getattr(cfg, section), key)
         if trained != now:
@@ -93,18 +104,16 @@ def test(cfg: Config, checkpoint: str | Path, splits: list[str] | None = None) -
 
     weights, ckpt_cfg = load_weights(path)
     _check_config(ckpt_cfg, cfg)
-    if has_injection(weights) != cfg.model.inject:
+    source = injection(cfg.to_dict()["model"])
+    if has_injection(weights) != (source == "blocks"):
         raise ValueError(
-            f"{path} {'has' if has_injection(weights) else 'lacks'} knowledge-injection blocks but model.inject="
-            f"{cfg.model.inject}; pass --set model.inject={str(has_injection(weights)).lower()}"
+            f"{path} has frozen injection blocks; test it with configs/methods/kiclip_blocks.yaml"
+            if has_injection(weights) else f"{path} lacks the frozen injection blocks model.inject_source=blocks needs"
         )
-    clip = CLIP.from_state_dict(
-        weights, temporal=cfg.model.temporal, num_frames=cfg.data.num_frames, inject=cfg.model.inject
-    )
-    model = KICLIP(clip, cfg.data.num_frames, distill=False).to(device)
+    model = build_kiclip(cfg, weights).to(device)
 
     logger.info("checkpoint   : %s", path)
-    logger.info("model        : temporal %s | injection %s", cfg.model.temporal, cfg.model.inject)
+    logger.info("model        : temporal %s | injection from %s", cfg.model.temporal, source or "nothing")
     logger.info("device       : %s x %d", device, world)
     logger.info("views        : %d clips x %d frames, crop %d", cfg.test.views, cfg.data.num_frames, cfg.data.crop_size)
 

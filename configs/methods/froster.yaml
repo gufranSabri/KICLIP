@@ -1,4 +1,3 @@
-# FROSTER: no knowledge injection, no aux classifier
+# FROSTER: no knowledge injection
 model:
   inject: false
-  aux_weight: 0.0

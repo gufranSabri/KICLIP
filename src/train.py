@@ -15,8 +15,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from src.config import Config
 from src.data.dataset import VideoDataset
 from src.data.prompts import TEMPLATES, tokenize
-from src.models.clip import CLIP, pretrained_state
-from src.models.kiclip import KICLIP, build_kiclip, class_features, distillation_loss, frame_features
+from src.models.kiclip import KICLIP, build_kiclip
 from src.test import evaluate
 from src.utils import dist
 from src.utils.logger import get_logger, setup_logging
@@ -54,14 +53,14 @@ def _accumulate(average: dict | None, model: torch.nn.Module, n: int) -> dict:
     return average
 
 
-def train_epoch(model, teacher, loader, tokens, optimizer, scaler, cfg: Config, epoch: int, accum: int,
+def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: int, accum: int,
                 device: torch.device, main: bool) -> dict:
     model.train()
     amp = cfg.train.amp and device.type == "cuda"
     ddp = isinstance(model, DistributedDataParallel)
     steps = len(loader) // accum
     batches = iter(loader)
-    sums = torch.zeros(6, device=device)  # loss, ce, kd, aux, correct, videos
+    sums = torch.zeros(5, device=device)  # loss, ce, kd, correct, videos
 
     for step in progress(range(steps), desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main):
         lr = lr_at(cfg, epoch + step / steps)
@@ -78,20 +77,13 @@ def train_epoch(model, teacher, loader, tokens, optimizer, scaler, cfg: Config, 
             sync = contextlib.nullcontext() if not ddp or micro == accum - 1 else model.no_sync()
             with sync:
                 with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-                    logits, frames, classes, aux_logits = model(video, prompt)
+                    logits, kd = model(video, prompt)
                     ce = F.cross_entropy(logits, labels)
-                    kd = aux = torch.zeros((), device=device)
-                    if teacher is not None:
-                        with torch.no_grad():
-                            target = frame_features(teacher, video), class_features(teacher, prompt)
-                        kd = distillation_loss(frames, classes, *target)
-                    if aux_logits is not None:
-                        aux = F.cross_entropy(aux_logits, labels)
-                    loss = ce + cfg.model.distill_weight * kd + cfg.model.aux_weight * aux
+                    loss = ce + cfg.model.distill_weight * kd
                 scaler.scale(loss / accum).backward()
             step_loss += loss.detach()
             sums += torch.stack([
-                loss.detach(), ce.detach(), kd.detach(), aux.detach(),
+                loss.detach(), ce.detach(), kd.detach(),
                 (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
             ])
 
@@ -103,10 +95,10 @@ def train_epoch(model, teacher, loader, tokens, optimizer, scaler, cfg: Config, 
         scaler.step(optimizer)
         scaler.update()
 
-    loss, ce, kd, aux, correct, videos = dist.all_sum(sums.tolist(), device)
+    loss, ce, kd, correct, videos = dist.all_sum(sums.tolist(), device)
     micro_steps = steps * accum * dist.rank_world()[1]
     return {
-        "loss": loss / micro_steps, "ce": ce / micro_steps, "kd": kd / micro_steps, "aux": aux / micro_steps,
+        "loss": loss / micro_steps, "ce": ce / micro_steps, "kd": kd / micro_steps,
         "top1": 100 * correct / max(videos, 1), "lr": lr,
     }
 
@@ -133,12 +125,12 @@ def log_header(cfg: Config, run_dir, device, world: int, accum: int, steps: int,
     _section("model")
     logger.info("student      : %s OpenAI CLIP | temporal %s | grad checkpointing %s",
                 m.arch, m.temporal, m.grad_checkpointing)
-    logger.info("injection    : %s", "frozen pretrained blocks averaged in before every vision block"
+    source = {"teacher": "the teacher's activations", "blocks": "frozen block copies run on the student's stem"}
+    logger.info("injection    : %s", f"{source[m.inject_source]}, averaged in before every vision block"
                 if m.inject else "off")
     logger.info("teacher      : %s", f"frozen {m.arch} | distill_weight {m.distill_weight:g} | "
-                f"residual_alpha {m.residual_alpha:g}" if m.distill_weight > 0 else "off")
-    logger.info("aux          : %s", f"{len(train_set.classnames)}-way classifier on the projected video "
-                f"features | aux_weight {m.aux_weight:g}" if m.aux_weight > 0 else "off")
+                f"residual_alpha {m.residual_alpha:g}"
+                if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") else "off")
 
     _section("optimisation")
     logger.info("batch        : %d = %d per forward x %d GPU(s) x %d accumulation",
@@ -150,13 +142,12 @@ def log_header(cfg: Config, run_dir, device, world: int, accum: int, steps: int,
     logger.info("average      : epochs %d..%d -> averaged.pt", t.average_from, t.epochs)
 
 
-def log_param_counts(model: KICLIP, teacher: CLIP | None) -> None:
+def log_param_counts(model: KICLIP) -> None:
     clip = model.model
     groups = [
         ("vision encoder", [clip.visual]),
         ("text encoder", [clip.transformer, clip.token_embedding, clip.ln_final]),
         ("projectors", [p for p in (model.projector_v, model.projector_t) if p is not None]),
-        ("aux classifier", [model.aux_classifier] if model.aux_classifier is not None else []),
     ]
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     for name, mods in groups:
@@ -164,8 +155,7 @@ def log_param_counts(model: KICLIP, teacher: CLIP | None) -> None:
         logger.info("  %-22s %12s  (%4.1f%%)", name, f"{n:,}", 100 * n / max(total, 1))
     logger.info("  %-22s %12s", "TOTAL trainable", f"{total:,}")
     frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    frozen += sum(p.numel() for p in teacher.parameters()) if teacher is not None else 0
-    logger.info("  %-22s %12s  (injection blocks + teacher)", "frozen", f"{frozen:,}")
+    logger.info("  %-22s %12s  (teacher, injection blocks)", "frozen", f"{frozen:,}")
 
 
 def train(cfg: Config, run_name: str | None = None) -> dict:
@@ -215,12 +205,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         log_header(cfg, run_dir, device, world, accum, steps, train_set, val_set)
 
     # ---- model --------------------------------------------------------
-    state = pretrained_state(cfg.model.arch)
-    student = build_kiclip(cfg, state, len(train_set.classnames)).to(device)
-    teacher = None
-    if cfg.model.distill_weight > 0:
-        teacher = CLIP.from_state_dict(state).to(device).eval().requires_grad_(False)
-    del state
+    student = build_kiclip(cfg).to(device)
     if world > 1:
         model = DistributedDataParallel(student, device_ids=[device.index] if device.type == "cuda" else None)
     else:
@@ -230,7 +215,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
 
     if main:
         _section("parameters")
-        log_param_counts(student, teacher)
+        log_param_counts(student)
 
     last = run_dir / "last.pt"
     start, history, average, averaged = 0, [], None, 0
@@ -253,7 +238,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
             sampler.set_epoch(epoch)
         t0 = time.time()
         record = {"epoch": epoch + 1, **train_epoch(
-            model, teacher, loader, tokens, optimizer, scaler, cfg, epoch, accum, device, main
+            model, loader, tokens, optimizer, scaler, cfg, epoch, accum, device, main
         )}
         if main and epoch + 1 >= t.average_from:
             averaged += 1
@@ -264,8 +249,8 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         history.append(record)
 
         val = f" | val {format_metrics(record['val'])}" if "val" in record else ""
-        logger.info("epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
-                    epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["top1"], val,
+        logger.info("epoch %2d | loss %.4f (ce %.4f, kd %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
+                    epoch + 1, record["loss"], record["ce"], record["kd"], record["top1"], val,
                     record["lr"], record["seconds"])
         if main:
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
