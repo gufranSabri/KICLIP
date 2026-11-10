@@ -24,7 +24,7 @@ import torch  # noqa: E402
 from src.config import load_config, parse_overrides  # noqa: E402
 from src.data.dataset import VideoDataset  # noqa: E402
 from src.eigencam import eigencam, layer_tokens, load_clip, load_vision_model, overlay  # noqa: E402
-from src.utils.seed import pick_device  # noqa: E402
+from src.utils.seed import pick_device, seed_everything  # noqa: E402
 
 
 def main() -> None:
@@ -47,6 +47,7 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config, overrides=parse_overrides(args.set))
+    seed_everything(cfg.seed)
     labels = args.labels or ["CLIP" if c == "clip" else Path(c).parent.name for c in args.checkpoints]
     if len(labels) != len(args.checkpoints):
         raise SystemExit(f"--labels has {len(labels)} entries for {len(args.checkpoints)} checkpoints")

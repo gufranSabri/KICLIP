@@ -113,7 +113,7 @@ def log_header(cfg: Config, run_dir, device, world: int, accum: int, steps: int,
     _section("run")
     logger.info("run dir      : %s", run_dir)
     logger.info("device       : %s x %d", device, world)
-    logger.info("seed         : %d", t.seed)
+    logger.info("seed         : %d", cfg.seed)
 
     _section("data")
     logger.info("train        : %s (%d videos, %d classes) from %s",
@@ -161,7 +161,7 @@ def log_param_counts(model: KICLIP) -> None:
 def train(cfg: Config, run_name: str | None = None) -> dict:
     rank, world, device = dist.setup()
     main = rank == 0
-    seed_everything(cfg.train.seed + rank)
+    seed_everything(cfg.seed + rank)
     t = cfg.train
 
     if t.batch_size % (t.micro_batch_size * world):
@@ -184,7 +184,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
     # ---- data ---------------------------------------------------------
     train_set = VideoDataset(cfg, cfg.data.train, train=True)
     tokens = tokenize(train_set.classnames).to(device)  # (prompts, C, L)
-    sampler = DistributedSampler(train_set, shuffle=True, seed=t.seed, drop_last=True) if world > 1 else None
+    sampler = DistributedSampler(train_set, shuffle=True, seed=cfg.seed, drop_last=True) if world > 1 else None
     loader = DataLoader(
         train_set,
         batch_size=t.micro_batch_size,

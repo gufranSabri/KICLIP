@@ -93,7 +93,7 @@ def test(cfg: Config, checkpoint: str | Path, splits: list[str] | None = None) -
     rank, world, device = dist.setup()
     if rank:
         logging.getLogger().setLevel(logging.WARNING)
-    seed_everything(cfg.train.seed)
+    seed_everything(cfg.seed)
 
     path = Path(checkpoint)
     if not path.exists():

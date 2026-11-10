@@ -59,7 +59,6 @@ class TrainConfig:
     amp: bool = True
     average_from: int = 2
     eval_every: int = 0
-    seed: int = 0
 
 
 @dataclass
@@ -75,6 +74,7 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     test: TestConfig = field(default_factory=TestConfig)
+    seed: int = 0
     data_root: str = "~/scratch/ahmedubc/KICLIP-data"
     splits_root: str = "splits"
     runs_root: str = "runs"
@@ -153,6 +153,8 @@ class Config:
 
         if te.views < 1 or te.batch_size < 1:
             raise ValueError("test.views and test.batch_size must be >= 1")
+        if not isinstance(self.seed, int) or isinstance(self.seed, bool) or self.seed < 0:
+            raise ValueError(f"seed must be an integer >= 0, got {self.seed!r}")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -171,7 +173,7 @@ _SECTIONS = {
     "train": TrainConfig,
     "test": TestConfig,
 }
-_TOP = ("data_root", "splits_root", "runs_root")
+_TOP = ("seed", "data_root", "splits_root", "runs_root")
 
 
 def _coerce(cls, section: dict) -> dict:

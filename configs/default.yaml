@@ -46,13 +46,13 @@ train:
   amp: true
   average_from: 2 # averaged.pt = mean of the weights after epochs average_from..epochs
   eval_every: 0 # epochs between val passes, 0 = never
-  seed: 0
 
 test:
   views: 3 # evenly spaced clips per video, logits summed
   batch_size: 8
   amp: true
 
+seed: 0 # every train, test and figure run; training ranks use seed + rank
 data_root: ~/scratch/ahmedubc/KICLIP-data
 splits_root: splits
 runs_root: runs
