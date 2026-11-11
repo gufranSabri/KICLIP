@@ -38,9 +38,15 @@ run() {
         || python kiclip.py "$@" test --checkpoint "$dir/averaged.pt"
 }
 
-run no_ki --config configs/b2n/hmdb51.yaml --config configs/methods/froster.yaml
-run ki --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.aux_classifier=false
-run ki_aux --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.aux_classifier=true
+run no_ki_b2 --config configs/b2n/hmdb51.yaml --config configs/methods/froster.yaml --set model.distill_weight=2.0
+run ki_b2 --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.aux_classifier=false  --set model.distill_weight=2.0
+run ki_aux_b2 --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.aux_classifier=true  --set model.distill_weight=2.0
+
+# ── STEP 3: L_KEEP SWEEP (notes/l_keep.md, HMDB51, on top of KI + aux) ──────
+# step-0 scale on real HMDB clips: absolute ~0.008 (with KI) / ~0.057 (no KI); geometric ~3e-4 (with KI) / ~7e-4 (no KI)
+
+run keep_abs_10 --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.l_keep=absolute --set model.keep_weight=10
+run keep_geo_10 --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.l_keep=geometric --set model.keep_weight=10
 
 python scripts/tables/runs_csv.py --runs-root runs --out docs/tables/runs.csv
 

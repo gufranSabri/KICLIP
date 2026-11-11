@@ -58,7 +58,7 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
     model.train()
     amp = cfg.train.amp and device.type == "cuda"
     steps = len(loader)
-    sums = torch.zeros(6, device=device)  # loss, ce, kd, aux, correct, videos
+    sums = torch.zeros(7, device=device)  # loss, ce, kd, aux, keep, correct, videos
 
     for step, (video, labels) in enumerate(
         progress(loader, desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main, total=steps)
@@ -71,12 +71,12 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         # one random template plus the bare description, redrawn every forward
         prompt = tokens[[random.randrange(len(TEMPLATES)), len(TEMPLATES)]]
         with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-            logits, kd, aux = model(video, prompt, labels)
+            logits, kd, aux, keep = model(video, prompt, labels)
             ce = F.cross_entropy(logits, labels)
-            loss = ce + cfg.model.distill_weight * kd + aux
+            loss = ce + cfg.model.distill_weight * kd + aux + cfg.model.keep_weight * keep
         scaler.scale(loss).backward()
         sums += torch.stack([
-            loss.detach(), ce.detach(), kd.detach(), aux.detach(),
+            loss.detach(), ce.detach(), kd.detach(), aux.detach(), keep.detach(),
             (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
         ])
 
@@ -88,11 +88,11 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         scaler.step(optimizer)
         scaler.update()
 
-    loss, ce, kd, aux, correct, videos = dist.all_sum(sums.tolist(), device)
+    loss, ce, kd, aux, keep, correct, videos = dist.all_sum(sums.tolist(), device)
     total_steps = steps * dist.rank_world()[1]
     return {
         "loss": loss / total_steps, "ce": ce / total_steps, "kd": kd / total_steps, "aux": aux / total_steps,
-        "top1": 100 * correct / max(videos, 1), "lr": lr,
+        "keep": keep / total_steps, "top1": 100 * correct / max(videos, 1), "lr": lr,
     }
 
 
@@ -123,9 +123,13 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
                 if m.inject else "off")
     logger.info("teacher      : %s", f"frozen {m.arch} | distill_weight {m.distill_weight:g} | "
                 f"residual_alpha {m.residual_alpha:g}"
-                if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") else "off")
+                if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") or m.l_keep != "none"
+                else "off")
     logger.info("aux classif. : %s", "a fresh MLP on the pooled video embedding, trained with CE"
                 if m.aux_classifier else "off")
+    keep_desc = {"absolute": "per-token cosine", "geometric": "batch class-token similarities", "both": "both"}
+    logger.info("keep (l_keep): %s", f"{keep_desc[m.l_keep]} on every vision block | keep_weight {m.keep_weight:g}"
+                if m.l_keep != "none" else "off")
 
     _section("optimisation")
     logger.info("batch        : %d = %d per GPU x %d GPU(s), no accumulation", t.batch_size, per_gpu_batch, world)
@@ -240,9 +244,11 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         history.append(record)
 
         val = f" | val {format_metrics(record['val'])}" if "val" in record else ""
-        logger.info("epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
-                    epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["top1"], val,
-                    record["lr"], record["seconds"])
+        logger.info(
+            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, keep %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
+            epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["keep"], record["top1"],
+            val, record["lr"], record["seconds"],
+        )
         if main:
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
             torch.save({

@@ -139,6 +139,18 @@ class Transformer(nn.Module):
             x = self._run(block, x)
         return x, inputs
 
+    def hidden(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> list[torch.Tensor]:
+        # every block's own output, (N, L, D) each; frozen: as in forward, injection's effect on the input
+        t, outputs = x, []
+        for i, block in enumerate(self.resblocks):
+            if self.resblocks_f is not None:
+                x, t = (x + t) / 2, self._run(self.resblocks_f[i], t)
+            elif frozen is not None:
+                x = (x + frozen[i]) / 2
+            x = self._run(block, x)
+            outputs.append(x)
+        return outputs
+
 
 class VisionTransformer(nn.Module):
     def __init__(
@@ -187,6 +199,10 @@ class VisionTransformer(nn.Module):
     def trace(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:  # (N, D) and every block's input
         x, inputs = self.transformer.trace(self.embed(x))
         return self.head(x), inputs
+
+    def hidden(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> list[torch.Tensor]:
+        # every block's own output, (N, 1 + P, W) each
+        return self.transformer.hidden(self.embed(x), frozen)
 
 
 class CLIP(nn.Module):

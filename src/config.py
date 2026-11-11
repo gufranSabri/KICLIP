@@ -13,6 +13,7 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 VALID_ARCHS = ("ViT-B-32", "ViT-B-16", "ViT-L-14")
 VALID_TEMPORAL = ("expand",)
 VALID_INJECT_SOURCES = ("teacher", "blocks")
+VALID_KEEP = ("none", "absolute", "geometric", "both")
 CROSS_TEST = (
     "cross/ucf101/full", "cross/ucf101/split1", "cross/ucf101/split2", "cross/ucf101/split3",
     "cross/hmdb51/full", "cross/hmdb51/split1", "cross/hmdb51/split2", "cross/hmdb51/split3",
@@ -29,6 +30,8 @@ class ModelConfig:
     distill_weight: float = 2.0
     residual_alpha: float = 0.1
     aux_classifier: bool = True
+    l_keep: str = "none"
+    keep_weight: float = 1.0
     grad_checkpointing: bool = False
 
 
@@ -115,6 +118,10 @@ class Config:
             raise ValueError("model.distill_weight must be >= 0")
         if m.residual_alpha < 0:
             raise ValueError("model.residual_alpha must be >= 0")
+        if m.l_keep not in VALID_KEEP:
+            raise ValueError(f"model.l_keep must be one of {VALID_KEEP}, got {m.l_keep!r}")
+        if m.keep_weight < 0:
+            raise ValueError("model.keep_weight must be >= 0")
 
         self.check_split(d.train, "data.train")
         if d.val is not None:

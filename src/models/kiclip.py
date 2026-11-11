@@ -33,6 +33,27 @@ def distillation_loss(
     )
 
 
+def gram(x: torch.Tensor) -> torch.Tensor:  # (N, W) -> (N, N) cosine similarities
+    x = F.normalize(x.float(), dim=-1)
+    return x @ x.T
+
+
+def keep_loss(mode: str, student: list[torch.Tensor], teacher: list[torch.Tensor]) -> torch.Tensor:
+    # student / teacher: every vision block's own output (frames, 1 + P, W); computed in float32, as CLIP's
+    # residual-stream activations overflow fp16 in the later blocks
+    absolute, geometric = [], []
+    for s, t in zip(student, teacher):
+        s, t = s.float(), t.float()
+        absolute.append(1 - F.cosine_similarity(s, t, dim=-1).mean())
+        geometric.append((gram(s[:, 0]) - gram(t[:, 0])).pow(2).mean())
+    absolute, geometric = torch.stack(absolute).mean(), torch.stack(geometric).mean()
+    if mode == "absolute":
+        return absolute
+    if mode == "geometric":
+        return geometric
+    return absolute + geometric  # both
+
+
 def residual_projector(dim: int) -> nn.Sequential:
     proj = nn.Sequential(nn.Linear(dim, dim, bias=False), nn.GELU(), nn.Linear(dim, dim, bias=False))
     nn.init.kaiming_normal_(proj[0].weight)
@@ -60,16 +81,18 @@ class KICLIP(nn.Module):
         alpha: float = 0.1,
         aux: bool = False,
         num_classes: int = 0,
+        keep: str = "none",
     ):
         super().__init__()
-        if (inject or distill) and teacher is None:
-            raise ValueError("injecting from the teacher and distilling towards it need a teacher")
+        if (inject or distill or keep != "none") and teacher is None:
+            raise ValueError("injecting from the teacher, distilling and keeping close to it need a teacher")
         self.model, self.num_frames, self.inject, self.alpha = model, num_frames, inject, alpha
         self.teacher = teacher.eval().requires_grad_(False) if teacher is not None else None
         self.projector_v = residual_projector(model.embed_dim) if distill else None
         self.projector_t = residual_projector(model.embed_dim) if distill else None
         # reference/KICLIP always builds this alongside distillation and trains it on the pooled, projected embedding
         self.aux = aux_classifier(model.embed_dim, num_classes) if aux else None
+        self.keep = keep
 
     # the teacher is the pretrained CLIP, rebuilt whenever a model is built, so checkpoints leave it out
     def state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
@@ -79,23 +102,40 @@ class KICLIP(nn.Module):
         teacher = {k: v for k, v in super().state_dict().items() if k.startswith("teacher.")}
         return super().load_state_dict({**teacher, **state}, strict, assign)
 
-    def encode_video(self, video: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # (..., T, 3, H, W) -> the student's and the teacher's frame features (frames, D), unit norm
+    def encode_video(
+        self, video: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor], list[torch.Tensor]]:
+        # (..., T, 3, H, W) -> the student's and the teacher's frame features (frames, D), unit norm,
+        # and (only when l_keep is on) every vision block's own output, (frames, 1 + P, W) each
         x = video.flatten(0, -4)
         stream = target = None
+        student_hidden: list[torch.Tensor] = []
+        teacher_hidden: list[torch.Tensor] = []
         if self.teacher is not None:
             with torch.no_grad():
-                target, stream = self.teacher.visual.trace(x)
+                if self.keep != "none":
+                    # teacher_hidden: every block's output, for the keep loss; stream: every block's input (the
+                    # embedding, then every output but the last), for injection -- same as trace()'s "inputs"
+                    embed = self.teacher.visual.embed(x)
+                    teacher_hidden = self.teacher.visual.transformer.hidden(embed)
+                    stream = [embed] + teacher_hidden[:-1]
+                    target = self.teacher.visual.head(teacher_hidden[-1])
+                else:
+                    target, stream = self.teacher.visual.trace(x)
             target = F.normalize(target, dim=-1)
-        frames = self.model.visual(x, stream if self.inject else None)
-        return F.normalize(frames, dim=-1), target
+        if self.keep != "none":
+            student_hidden = self.model.visual.hidden(x, stream if self.inject else None)
+            frames = self.model.visual.head(student_hidden[-1])
+        else:
+            frames = self.model.visual(x, stream if self.inject else None)
+        return F.normalize(frames, dim=-1), target, student_hidden, teacher_hidden
 
     def forward(
         self, video: torch.Tensor, tokens: torch.Tensor, labels: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # -> logits (B, C), the distillation loss and the aux classifier's cross-entropy
-        frames, teacher_frames = self.encode_video(video)  # (B*T, D)
-        classes = class_features(self.model, tokens)       # (C, D)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # -> logits (B, C), the distillation loss, the aux classifier's cross-entropy and the keep loss
+        frames, teacher_frames, student_hidden, teacher_hidden = self.encode_video(video)  # (B*T, D)
+        classes = class_features(self.model, tokens)                                       # (C, D)
         logits = clip_logits(self.model, frames, classes, self.num_frames)
         zero = torch.zeros((), device=logits.device)
         pooled_frames = frames
@@ -114,7 +154,8 @@ class KICLIP(nn.Module):
         if self.aux is not None and labels is not None:
             pooled = pooled_frames.view(-1, self.num_frames, pooled_frames.shape[-1]).mean(1)  # (B, D)
             aux = F.cross_entropy(self.aux(pooled), labels)
-        return logits, kd, aux
+        keep = keep_loss(self.keep, student_hidden, teacher_hidden) if self.keep != "none" else zero
+        return logits, kd, aux, keep
 
 
 def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, num_classes: int = 0) -> KICLIP:
@@ -124,6 +165,7 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
     from_teacher = m.inject and m.inject_source == "teacher"
     distill = weights is None and m.distill_weight > 0
     aux = weights is None and m.aux_classifier
+    keep = m.l_keep if weights is None else "none"
     pretrained = pretrained_state(m.arch) if weights is None or from_teacher else None
     if weights is None:
         weights = with_frozen_copy(pretrained) if blocks else pretrained
@@ -134,8 +176,8 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
         inject=blocks,
         grad_checkpointing=m.grad_checkpointing,
     )
-    teacher = CLIP.from_state_dict(pretrained) if distill or from_teacher else None
+    teacher = CLIP.from_state_dict(pretrained) if distill or from_teacher or keep != "none" else None
     return KICLIP(
         student, cfg.data.num_frames, teacher, inject=from_teacher, distill=distill, alpha=m.residual_alpha,
-        aux=aux, num_classes=num_classes,
+        aux=aux, num_classes=num_classes, keep=keep,
     )
