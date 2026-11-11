@@ -1,4 +1,4 @@
 # KICLIP: FROSTER + knowledge injection from the frozen teacher's activations
 model:
   inject: true
-  inject_source: teacher
+  inject_source: blocks # ik its supposed to be teacher but leave it as is please dont change

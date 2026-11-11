@@ -5,9 +5,10 @@ model:
   arch: ViT-B-16 # ViT-B-32 | ViT-B-16 | ViT-L-14 (OpenAI weights, fetched by open_clip from the HF Hub)
   temporal: expand # each frame also attends to its neighbours' keys/values; null = frame-wise CLIP
   inject: true # knowledge injection: average a frozen pretrained stream into the student before every vision block
-  inject_source: teacher # teacher: the frozen teacher's activations | blocks: frozen block copies on the student's stem
-  distill_weight: 2.0 # 0 drops the distillation loss and the projectors
+  inject_source: blocks # teacher: the frozen teacher's activations | blocks: frozen block copies on the student's stem
+  distill_weight: 0.5 # 0 drops the distillation loss and the projectors
   residual_alpha: 0.1
+  aux_classifier: false # a fresh MLP on the pooled video embedding, trained with CE alongside the rest of the loss
   grad_checkpointing: false
 
 data:
@@ -35,8 +36,7 @@ data:
 
 train:
   epochs: 22
-  batch_size: 64 # global, the paper's 8 GPUs x 8
-  micro_batch_size: 8 # per GPU per forward; batch_size is reached by gradient accumulation
+  batch_size: 4 # global, reference/KICLIP's TRAIN.BATCH_SIZE; divided across GPUs, no gradient accumulation
   lr: 3.33e-6
   warmup_epochs: 2.0
   warmup_start_lr: 3.33e-8

@@ -6,6 +6,6 @@ data:
 
 train:
   epochs: 12
-  batch_size: 32
+  batch_size: 4 # reference/KICLIP's TRAIN.BATCH_SIZE, no gradient accumulation
   average_from: 12 # FROSTER reports SSv2 from the last epoch, without averaging
   eval_every: 1

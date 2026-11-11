@@ -11,6 +11,10 @@ A student CLIP is fine-tuned on videos while it is kept close to the original CL
    injection costs no extra compute in training. It is active at test time too. The original KICLIP instead ran
    frozen copies of the blocks on the student's own stem and backpropagated through them
    (`model.inject_source: blocks`, about 1.36x the training FLOPs).
+3. **Aux classifier (training only, needs distillation on)**: a fresh MLP on the pooled, distillation-projected
+   video embedding, trained with cross-entropy on the training classes alongside the rest of the loss. In
+   reference/KICLIP this head is seeded from a pretrained ImageNet ViT-B/16 classifier and its loss is computed but
+   never added to training (left commented out); here it is a fresh MLP and its loss is added.
 
 The student's vision attention also reads the keys/values of each frame's neighbours (`model.temporal: expand`),
 class embeddings come from an ensemble of templated GPT-rephrased descriptions, and `averaged.pt` is the mean of
@@ -25,7 +29,7 @@ src/models/clip.py     OpenAI CLIP as plain modules (names match the checkpoints
 src/models/kiclip.py   student wrapper: frozen teacher (injection + distillation), projectors, distillation loss
 src/eigencam.py        EigenCAM over the vision blocks
 src/data/              PyAV decoding, clip sampling and transforms, prompt templates
-src/train.py           training loop (AMP, gradient accumulation, DDP, resume, online weight averaging)
+src/train.py           training loop (AMP, DDP, resume, online weight averaging)
 src/test.py            multi-view evaluation
 configs/               default.yaml (KICLIP), one yaml per (protocol, dataset), methods/*.yaml overlays
 splits/                FROSTER's split CSVs and class-description JSONs
@@ -117,8 +121,8 @@ subcommand. `test` evaluates `data.test` unless `--splits` is given and writes `
 checkpoint. It also loads the original FROSTER and KICLIP releases (`swa_2_22.pth`, the latter with
 `configs/methods/kiclip_blocks.yaml`). `test` checks that the config injects the way the checkpoint was trained.
 
-Multi-GPU runs go through `torchrun`; `train.batch_size` is global, so the paper's batch is kept on any GPU count by
-gradient accumulation (`train.micro_batch_size` per GPU per forward):
+Multi-GPU runs go through `torchrun`; `train.batch_size` is global and split evenly across GPUs per step, as in
+reference/KICLIP — no gradient accumulation:
 
 ```bash
 torchrun --standalone --nproc_per_node=4 kiclip.py --config configs/cross/k400.yaml train --run-name cross_k400_kiclip

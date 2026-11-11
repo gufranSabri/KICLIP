@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import math
@@ -53,41 +52,35 @@ def _accumulate(average: dict | None, model: torch.nn.Module, n: int) -> dict:
     return average
 
 
-def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: int, accum: int,
+def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: int,
                 device: torch.device, main: bool) -> dict:
+    # no gradient accumulation, as in reference/KICLIP: every batch is one optimizer step
     model.train()
     amp = cfg.train.amp and device.type == "cuda"
-    ddp = isinstance(model, DistributedDataParallel)
-    steps = len(loader) // accum
-    batches = iter(loader)
-    sums = torch.zeros(5, device=device)  # loss, ce, kd, correct, videos
+    steps = len(loader)
+    sums = torch.zeros(6, device=device)  # loss, ce, kd, aux, correct, videos
 
-    for step in progress(range(steps), desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main):
+    for step, (video, labels) in enumerate(
+        progress(loader, desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main, total=steps)
+    ):
         lr = lr_at(cfg, epoch + step / steps)
         for group in optimizer.param_groups:
             group["lr"] = lr
         optimizer.zero_grad(set_to_none=True)
-        step_loss = torch.zeros((), device=device)
+        video, labels = video.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        # one random template plus the bare description, redrawn every forward
+        prompt = tokens[[random.randrange(len(TEMPLATES)), len(TEMPLATES)]]
+        with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
+            logits, kd, aux = model(video, prompt, labels)
+            ce = F.cross_entropy(logits, labels)
+            loss = ce + cfg.model.distill_weight * kd + aux
+        scaler.scale(loss).backward()
+        sums += torch.stack([
+            loss.detach(), ce.detach(), kd.detach(), aux.detach(),
+            (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
+        ])
 
-        for micro in range(accum):
-            video, labels = next(batches)
-            video, labels = video.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            # one random template plus the bare description, redrawn every forward
-            prompt = tokens[[random.randrange(len(TEMPLATES)), len(TEMPLATES)]]
-            sync = contextlib.nullcontext() if not ddp or micro == accum - 1 else model.no_sync()
-            with sync:
-                with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-                    logits, kd = model(video, prompt)
-                    ce = F.cross_entropy(logits, labels)
-                    loss = ce + cfg.model.distill_weight * kd
-                scaler.scale(loss / accum).backward()
-            step_loss += loss.detach()
-            sums += torch.stack([
-                loss.detach(), ce.detach(), kd.detach(),
-                (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
-            ])
-
-        if not torch.isfinite(step_loss):
+        if not torch.isfinite(loss):
             raise RuntimeError(f"non-finite loss at epoch {epoch + 1}, step {step}; lower train.lr or disable train.amp")
         scaler.unscale_(optimizer)
         if cfg.train.grad_clip > 0:
@@ -95,10 +88,10 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         scaler.step(optimizer)
         scaler.update()
 
-    loss, ce, kd, correct, videos = dist.all_sum(sums.tolist(), device)
-    micro_steps = steps * accum * dist.rank_world()[1]
+    loss, ce, kd, aux, correct, videos = dist.all_sum(sums.tolist(), device)
+    total_steps = steps * dist.rank_world()[1]
     return {
-        "loss": loss / micro_steps, "ce": ce / micro_steps, "kd": kd / micro_steps,
+        "loss": loss / total_steps, "ce": ce / total_steps, "kd": kd / total_steps, "aux": aux / total_steps,
         "top1": 100 * correct / max(videos, 1), "lr": lr,
     }
 
@@ -108,7 +101,7 @@ def _section(title: str) -> None:
     logger.info("--- %s %s", title, "-" * max(0, 58 - len(title)))
 
 
-def log_header(cfg: Config, run_dir, device, world: int, accum: int, steps: int, train_set, val_set) -> None:
+def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, steps: int, train_set, val_set) -> None:
     m, d, t = cfg.model, cfg.data, cfg.train
     _section("run")
     logger.info("run dir      : %s", run_dir)
@@ -131,10 +124,11 @@ def log_header(cfg: Config, run_dir, device, world: int, accum: int, steps: int,
     logger.info("teacher      : %s", f"frozen {m.arch} | distill_weight {m.distill_weight:g} | "
                 f"residual_alpha {m.residual_alpha:g}"
                 if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") else "off")
+    logger.info("aux classif. : %s", "a fresh MLP on the pooled video embedding, trained with CE"
+                if m.aux_classifier else "off")
 
     _section("optimisation")
-    logger.info("batch        : %d = %d per forward x %d GPU(s) x %d accumulation",
-                t.batch_size, t.micro_batch_size, world, accum)
+    logger.info("batch        : %d = %d per GPU x %d GPU(s), no accumulation", t.batch_size, per_gpu_batch, world)
     logger.info("steps        : %d per epoch x %d epochs", steps, t.epochs)
     logger.info("lr           : %.3g | warmup %g epochs from %.3g | cosine to %.3g",
                 t.lr, t.warmup_epochs, t.warmup_start_lr, t.end_lr)
@@ -148,6 +142,7 @@ def log_param_counts(model: KICLIP) -> None:
         ("vision encoder", [clip.visual]),
         ("text encoder", [clip.transformer, clip.token_embedding, clip.ln_final]),
         ("projectors", [p for p in (model.projector_v, model.projector_t) if p is not None]),
+        ("aux classifier", [model.aux] if model.aux is not None else []),
     ]
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     for name, mods in groups:
@@ -164,12 +159,8 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
     seed_everything(cfg.seed + rank)
     t = cfg.train
 
-    if t.batch_size % (t.micro_batch_size * world):
-        raise ValueError(
-            f"train.batch_size ({t.batch_size}) must be a multiple of train.micro_batch_size x GPUs "
-            f"({t.micro_batch_size} x {world})"
-        )
-    accum = t.batch_size // (t.micro_batch_size * world)
+    # per-GPU batch, as in reference/KICLIP's int(TRAIN.BATCH_SIZE / max(1, NUM_GPUS)); no gradient accumulation
+    per_gpu_batch = max(1, t.batch_size // world)
 
     run_dir = cfg.run_dir(run_name)
     if main:
@@ -187,7 +178,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
     sampler = DistributedSampler(train_set, shuffle=True, seed=cfg.seed, drop_last=True) if world > 1 else None
     loader = DataLoader(
         train_set,
-        batch_size=t.micro_batch_size,
+        batch_size=per_gpu_batch,
         shuffle=sampler is None,
         sampler=sampler,
         drop_last=True,
@@ -195,17 +186,17 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         pin_memory=device.type == "cuda",
         persistent_workers=cfg.data.num_workers > 0,
     )
-    steps = len(loader) // accum
+    steps = len(loader)
     if steps == 0:
-        raise ValueError(f"{cfg.data.train} has {len(train_set)} videos, fewer than one batch of {t.batch_size}")
+        raise ValueError(f"{cfg.data.train} has {len(train_set)} videos, fewer than one batch of {per_gpu_batch}")
     val_set = VideoDataset(cfg, cfg.data.val, train=False, views=1) if t.eval_every else None
     val_tokens = tokenize(val_set.classnames) if val_set is not None else None
 
     if main:
-        log_header(cfg, run_dir, device, world, accum, steps, train_set, val_set)
+        log_header(cfg, run_dir, device, world, per_gpu_batch, steps, train_set, val_set)
 
     # ---- model --------------------------------------------------------
-    student = build_kiclip(cfg).to(device)
+    student = build_kiclip(cfg, num_classes=len(train_set.classnames)).to(device)
     if world > 1:
         model = DistributedDataParallel(student, device_ids=[device.index] if device.type == "cuda" else None)
     else:
@@ -238,7 +229,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
             sampler.set_epoch(epoch)
         t0 = time.time()
         record = {"epoch": epoch + 1, **train_epoch(
-            model, loader, tokens, optimizer, scaler, cfg, epoch, accum, device, main
+            model, loader, tokens, optimizer, scaler, cfg, epoch, device, main
         )}
         if main and epoch + 1 >= t.average_from:
             averaged += 1
@@ -249,8 +240,8 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         history.append(record)
 
         val = f" | val {format_metrics(record['val'])}" if "val" in record else ""
-        logger.info("epoch %2d | loss %.4f (ce %.4f, kd %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
-                    epoch + 1, record["loss"], record["ce"], record["kd"], record["top1"], val,
+        logger.info("epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
+                    epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["top1"], val,
                     record["lr"], record["seconds"])
         if main:
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))

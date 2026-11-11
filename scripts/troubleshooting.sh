@@ -27,25 +27,20 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cu
 bash scripts/data/download.sh
 python scripts/data/organize.py --check --workers 8 --delete-raw
 
-# ── STEP 2: SMOKE TEST (KICLIP and FROSTER on HMDB51, a few minutes each) ───
+# ── STEP 2: SMOKE TEST (no KI vs KI vs KI + aux, HMDB51, a few minutes each) ─
 
-python kiclip.py --config configs/b2n/hmdb51.yaml train --run-name smoke_kiclip --set train.epochs=3 --set train.warmup_epochs=1
-python kiclip.py --config configs/b2n/hmdb51.yaml test --checkpoint runs/smoke_kiclip/averaged.pt
+# run <run-name> [config args]: train into runs/<run-name>, then test that checkpoint; skips finished steps
+run() {
+    local name=$1; shift
+    local dir="runs/$name"
+    [[ -f "$dir/averaged.pt" ]] || python kiclip.py "$@" train --run-name "$name" || return
+    [[ -f "$dir/test_b2n_hmdb51_base.json" && -f "$dir/test_b2n_hmdb51_novel.json" ]] \
+        || python kiclip.py "$@" test --checkpoint "$dir/averaged.pt"
+}
 
-python kiclip.py --config configs/b2n/hmdb51.yaml --config configs/methods/froster.yaml train --run-name smoke_froster --set train.epochs=3 --set train.warmup_epochs=1
-python kiclip.py --config configs/b2n/hmdb51.yaml --config configs/methods/froster.yaml test --checkpoint runs/smoke_froster/averaged.pt
+run no_ki --config configs/b2n/hmdb51.yaml --config configs/methods/froster.yaml
+run ki --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.aux_classifier=false
+run ki_aux --config configs/b2n/hmdb51.yaml --config configs/methods/kiclip.yaml --set model.aux_classifier=true
 
-python scripts/figures/eigencam.py --split b2n/hmdb51/novel --index 0 \
-    --checkpoints clip runs/smoke_froster/averaged.pt runs/smoke_kiclip/averaged.pt --labels CLIP FROSTER KICLIP
-
-# ── STEP 3: EXPERIMENTS ────────────────────────────────────────────────────
-# LAUNCH runs every train/test on all allocated GPUs; batch sizes stay the paper's.
-
-export LAUNCH="torchrun --standalone --nproc_per_node=$SLURM_GPUS_ON_NODE"
-export METHODS="kiclip froster"
-bash scripts/experiments/b2n.sh
-bash scripts/experiments/cross_dataset.sh
-
-python scripts/tables/b2n.py
-python scripts/tables/cross_dataset.py
+python scripts/tables/runs_csv.py --runs-root runs --out docs/tables/runs.csv
 

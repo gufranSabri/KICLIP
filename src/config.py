@@ -28,6 +28,7 @@ class ModelConfig:
     inject_source: str = "teacher"
     distill_weight: float = 2.0
     residual_alpha: float = 0.1
+    aux_classifier: bool = True
     grad_checkpointing: bool = False
 
 
@@ -48,8 +49,7 @@ class DataConfig:
 @dataclass
 class TrainConfig:
     epochs: int = 22
-    batch_size: int = 64
-    micro_batch_size: int = 8
+    batch_size: int = 4  # global; divided across GPUs, no gradient accumulation, as in reference/KICLIP
     lr: float = 3.33e-6
     warmup_epochs: float = 2.0
     warmup_start_lr: float = 3.33e-8
@@ -136,10 +136,8 @@ class Config:
 
         if t.epochs < 1:
             raise ValueError("train.epochs must be >= 1")
-        if t.micro_batch_size < 1 or t.batch_size % t.micro_batch_size:
-            raise ValueError(
-                f"train.batch_size ({t.batch_size}) must be a multiple of train.micro_batch_size ({t.micro_batch_size})"
-            )
+        if t.batch_size < 1:
+            raise ValueError("train.batch_size must be >= 1")
         if not 0 <= t.warmup_epochs < t.epochs:
             raise ValueError(f"train.warmup_epochs ({t.warmup_epochs}) must be in [0, train.epochs={t.epochs})")
         if not 0 < t.end_lr < t.lr:

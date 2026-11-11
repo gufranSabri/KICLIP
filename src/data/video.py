@@ -14,7 +14,8 @@ CLIP_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(1, 3, 1, 1)
 
 
 def read_clips(path: Path, num_frames: int, span: float, views: int | None) -> torch.Tensor:
-    # views=None: one random clip; otherwise `views` clips whose starts are spread evenly over the video
+    # views=None: one random clip; otherwise `views` clips, their starts offset-sampled as in reference/KICLIP:
+    # frame 0, floor(delta_frames / (views - 1)), 2 * that, ... (views == 1: the center), in frame-index units
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
         # DataLoader workers already decode in parallel; FFmpeg threads on top exhaust the task limit
@@ -22,7 +23,14 @@ def read_clips(path: Path, num_frames: int, span: float, views: int | None) -> t
         fps = float(stream.average_rate or stream.guessed_rate or 30)
         offset = float(stream.start_time * stream.time_base) if stream.start_time is not None else 0.0
         delta = max(_duration(container, stream, fps) - span, 0.0)
-        starts = [random.uniform(0.0, delta)] if views is None else [delta * v / views for v in range(views)]
+        if views is None:
+            starts = [random.uniform(0.0, delta)]
+        elif views == 1:
+            starts = [math.floor(delta * fps / 2) / fps]
+        else:
+            delta_frames = math.floor(delta * fps)
+            step_frames = math.floor(delta_frames / (views - 1))
+            starts = [v * step_frames / fps for v in range(views)]
         steps = np.linspace(0.0, max(span - 1.0 / fps, 0.0), num_frames)
         times = (np.asarray(starts)[:, None] + steps[None, :]).ravel() + offset
         frames = _pick(container, stream, times)
