@@ -96,20 +96,6 @@ def _check_config(ckpt_cfg: dict | None, cfg: Config) -> None:
             f"checkpoint was trained with injection from {trained or 'nothing'}, this config injects from "
             f"{now or 'nothing'}; stack the matching configs/methods/*.yaml"
         )
-    trained_motion = ckpt_cfg["model"].get("motion", False)
-    if trained_motion != cfg.model.motion:
-        raise ValueError(
-            f"checkpoint was trained with model.motion={trained_motion}, this config has model.motion={cfg.model.motion}; "
-            "stack the matching configs/methods/motion.yaml"
-        )
-    if trained_motion:
-        for key in ("motion_source", "motion_site", "motion_blocks", "motion_bottleneck"):
-            trained, now = ckpt_cfg["model"].get(key), getattr(cfg.model, key)
-            if trained != now:
-                raise ValueError(
-                    f"checkpoint was trained with model.{key}={trained!r}, this config has model.{key}={now!r}; "
-                    f"pass --set model.{key}={trained!r}"
-                )
     for section, key in (("model", "temporal"), ("data", "num_frames"), ("data", "sampling_rate")):
         trained, now = ckpt_cfg[section].get(key), getattr(getattr(cfg, section), key)
         if trained != now:

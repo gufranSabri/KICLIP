@@ -5,7 +5,7 @@ import random
 import torch
 import torch.nn as nn
 
-POOL_MODES = ("mean", "max", "min", "strided", "dropout")
+POOL_MODES = ("mean", "max", "dropout")
 
 
 def pool_segments(raw: torch.Tensor, n_segments: int, mode: str, dropout_p: float = 0.3) -> torch.Tensor:
@@ -20,14 +20,9 @@ def pool_segments(raw: torch.Tensor, n_segments: int, mode: str, dropout_p: floa
         raise ValueError(f"feature dim D={d} is not divisible by n_segments={n_segments}")
 
     segment_size = d // n_segments
-    if mode == "strided":
-        return raw[..., ::segment_size][..., :n_segments]
-
     chunked = raw.reshape(*raw.shape[:-1], n_segments, segment_size)
     if mode == "max":
         return chunked.amax(dim=-1)
-    if mode == "min":
-        return chunked.amin(dim=-1)
     if mode == "dropout":
         return _dropout_pool(chunked, dropout_p)
     return chunked.mean(dim=-1)

@@ -13,11 +13,8 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 VALID_ARCHS = ("ViT-B-32", "ViT-B-16", "ViT-L-14")
 VALID_TEMPORAL = ("expand",)
 VALID_INJECT_SOURCES = ("teacher", "blocks")
-VALID_KEEP = ("none", "absolute", "geometric", "both")
-VALID_MOTION_SOURCES = ("rgb_diff", "embed_diff")
-VALID_MOTION_SITES = ("input", "blocks")
 VALID_FIELD_SOURCES = ("student", "teacher", "both")
-VALID_FIELD_POOL_MODES = ("mean", "max", "min", "strided", "dropout")
+VALID_FIELD_POOL_MODES = ("mean", "max", "dropout")
 CROSS_TEST = (
     "cross/ucf101/full", "cross/ucf101/split1", "cross/ucf101/split2", "cross/ucf101/split3",
     "cross/hmdb51/full", "cross/hmdb51/split1", "cross/hmdb51/split2", "cross/hmdb51/split3",
@@ -34,15 +31,7 @@ class ModelConfig:
     distill_weight: float = 2.0
     residual_alpha: float = 0.1
     aux_classifier: bool = True
-    l_keep: str = "none"
-    keep_weight: float = 1.0
     grad_checkpointing: bool = False
-    motion: bool = False
-    motion_source: str = "rgb_diff"
-    motion_site: str = "input"
-    motion_blocks: list[int] = field(default_factory=lambda: [6, 9, 12])
-    motion_bottleneck: int = 64
-    motion_lr: float = 3.33e-5
     field_enabled: bool = False
     field_source: str = "student"
     field_segments: int = 64
@@ -137,22 +126,6 @@ class Config:
             raise ValueError("model.distill_weight must be >= 0")
         if m.residual_alpha < 0:
             raise ValueError("model.residual_alpha must be >= 0")
-        if m.l_keep not in VALID_KEEP:
-            raise ValueError(f"model.l_keep must be one of {VALID_KEEP}, got {m.l_keep!r}")
-        if m.keep_weight < 0:
-            raise ValueError("model.keep_weight must be >= 0")
-        if m.motion_source not in VALID_MOTION_SOURCES:
-            raise ValueError(f"model.motion_source must be one of {VALID_MOTION_SOURCES}, got {m.motion_source!r}")
-        if m.motion_site not in VALID_MOTION_SITES:
-            raise ValueError(f"model.motion_site must be one of {VALID_MOTION_SITES}, got {m.motion_site!r}")
-        if m.motion_site == "blocks" and not m.motion_blocks:
-            raise ValueError("model.motion_blocks must be non-empty when model.motion_site == 'blocks'")
-        if m.motion_bottleneck < 1:
-            raise ValueError("model.motion_bottleneck must be >= 1")
-        if m.motion_lr < 0:
-            raise ValueError("model.motion_lr must be >= 0")
-        if m.motion and m.motion_site == "blocks" and m.l_keep != "none":
-            raise ValueError("model.motion with motion_site=blocks does not support model.l_keep yet")
         if m.field_source not in VALID_FIELD_SOURCES:
             raise ValueError(f"model.field_source must be one of {VALID_FIELD_SOURCES}, got {m.field_source!r}")
         if m.field_segments < 1:

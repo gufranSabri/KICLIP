@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from src.config import Config
 from src.models.clip import CLIP, pretrained_state, with_frozen_copy
 from src.models.field import FieldEmbedder, build_field, sample_pool_mode
-from src.models.motion import embed_diff, motion_dim, rgb_diff
 
 TEXT_CHUNK = 2048
 
@@ -33,27 +32,6 @@ def distillation_loss(
         - F.cosine_similarity(frames, teacher_frames, dim=-1).mean()
         - F.cosine_similarity(classes, teacher_classes, dim=-1).mean()
     )
-
-
-def gram(x: torch.Tensor) -> torch.Tensor:  # (N, W) -> (N, N) cosine similarities
-    x = F.normalize(x.float(), dim=-1)
-    return x @ x.T
-
-
-def keep_loss(mode: str, student: list[torch.Tensor], teacher: list[torch.Tensor]) -> torch.Tensor:
-    # student / teacher: every vision block's own output (frames, 1 + P, W); computed in float32, as CLIP's
-    # residual-stream activations overflow fp16 in the later blocks
-    absolute, geometric = [], []
-    for s, t in zip(student, teacher):
-        s, t = s.float(), t.float()
-        absolute.append(1 - F.cosine_similarity(s, t, dim=-1).mean())
-        geometric.append((gram(s[:, 0]) - gram(t[:, 0])).pow(2).mean())
-    absolute, geometric = torch.stack(absolute).mean(), torch.stack(geometric).mean()
-    if mode == "absolute":
-        return absolute
-    if mode == "geometric":
-        return geometric
-    return absolute + geometric  # both
 
 
 def residual_projector(dim: int) -> nn.Sequential:
@@ -83,8 +61,6 @@ class KICLIP(nn.Module):
         alpha: float = 0.1,
         aux: bool = False,
         num_classes: int = 0,
-        keep: str = "none",
-        motion_source: str | None = None,
         field_source: str | None = None,
         field_segments: int = 64,
         field_pool_modes: tuple[str, ...] = ("mean",),
@@ -93,20 +69,15 @@ class KICLIP(nn.Module):
         field_ce_weight: float = 1.0,
     ):
         super().__init__()
-        needs_teacher = inject or distill or keep != "none" or field_source in ("teacher", "both")
+        needs_teacher = inject or distill or field_source in ("teacher", "both")
         if needs_teacher and teacher is None:
-            raise ValueError(
-                "injecting from the teacher, distilling, keeping close to it and field_source=teacher/both "
-                "need a teacher"
-            )
+            raise ValueError("injecting from the teacher, distilling and field_source=teacher/both need a teacher")
         self.model, self.num_frames, self.inject, self.alpha = model, num_frames, inject, alpha
         self.teacher = teacher.eval().requires_grad_(False) if teacher is not None else None
         self.projector_v = residual_projector(model.embed_dim) if distill else None
         self.projector_t = residual_projector(model.embed_dim) if distill else None
         # reference/KICLIP always builds this alongside distillation and trains it on the pooled, projected embedding
         self.aux = aux_classifier(model.embed_dim, num_classes) if aux else None
-        self.keep = keep
-        self.motion_source = motion_source
         self.field_source = field_source
         self.field_segments, self.field_pool_modes = field_segments, list(field_pool_modes)
         self.field_dropout_p, self.field_alpha, self.field_ce_weight = field_dropout_p, field_alpha, field_ce_weight
@@ -132,11 +103,9 @@ class KICLIP(nn.Module):
         self, video: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor], list[torch.Tensor], torch.Tensor | None]:
         # (..., T, 3, H, W) -> the student's and the teacher's frame features (frames, D), unit norm (already
-        # field-corrected when field_source is set), every vision block's own output (only when l_keep/field is
-        # on), and the RAW (unnormalized) field correction, for field_ce's own classification loss
-        motion = self._motion(video) if self.motion_source is not None else None
-        needs_hidden = self.keep != "none" or self.field_source is not None
-        needs_teacher_hidden = self.keep != "none" or self.field_source in ("teacher", "both")
+        # field-corrected when field_source is set), every vision block's own output (only when field_source is
+        # set), and the RAW (unnormalized) field correction, for field_ce's own classification loss
+        needs_teacher_hidden = self.field_source in ("teacher", "both")
         x = video.flatten(0, -4)
         stream = target = None
         student_hidden: list[torch.Tensor] = []
@@ -144,9 +113,8 @@ class KICLIP(nn.Module):
         if self.teacher is not None:
             with torch.no_grad():
                 if needs_teacher_hidden:
-                    # teacher_hidden: every block's own output, for the keep loss and/or field; stream: every
-                    # block's input (the embedding, then every output but the last), for injection -- same as
-                    # trace()'s "inputs"
+                    # teacher_hidden: every block's own output, for the field; stream: every block's input (the
+                    # embedding, then every output but the last), for injection -- same as trace()'s "inputs"
                     embed = self.teacher.visual.embed(x)
                     teacher_hidden = self.teacher.visual.transformer.hidden(embed)
                     stream = [embed] + teacher_hidden[:-1]
@@ -154,11 +122,11 @@ class KICLIP(nn.Module):
                 else:
                     target, stream = self.teacher.visual.trace(x)
             target = F.normalize(target, dim=-1)
-        if needs_hidden:
-            student_hidden = self.model.visual.hidden(x, stream if self.inject else None, motion)
+        if self.field_source is not None:
+            student_hidden = self.model.visual.hidden(x, stream if self.inject else None)
             frames = self.model.visual.head(student_hidden[-1])
         else:
-            frames = self.model.visual(x, stream if self.inject else None, motion)
+            frames = self.model.visual(x, stream if self.inject else None)
         field_raw = None
         if self.field_source is not None:
             if self.training:
@@ -189,16 +157,10 @@ class KICLIP(nn.Module):
         stacked = channels[0] if len(channels) == 1 else torch.cat(channels, dim=-1)  # (N, L, C*M)
         return self.field_embed(stacked)  # (N, D), unnormalized
 
-    def _motion(self, video: torch.Tensor) -> torch.Tensor:  # (..., T, 3, H, W) -> (N, P, motion_dim)
-        x = video.flatten(0, -4)
-        if self.motion_source == "rgb_diff":
-            return rgb_diff(x, self.num_frames, self.model.visual.conv1.kernel_size[0])
-        return embed_diff(x, self.num_frames, self.model.visual.conv1)
-
     def forward(
         self, video: torch.Tensor, tokens: torch.Tensor, labels: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # -> logits (B, C), the distillation loss, the aux classifier's CE, the keep loss, the field embedder's CE
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # -> logits (B, C), the distillation loss, the aux classifier's CE, the field embedder's CE
         frames, teacher_frames, student_hidden, teacher_hidden, field_raw = self.encode_video(video)  # (B*T, D)
         classes = class_features(self.model, tokens)                                       # (C, D)
         logits = clip_logits(self.model, frames, classes, self.num_frames)  # frames already carries field_alpha * field_raw
@@ -219,7 +181,6 @@ class KICLIP(nn.Module):
         if self.aux is not None and labels is not None:
             pooled = pooled_frames.view(-1, self.num_frames, pooled_frames.shape[-1]).mean(1)  # (B, D)
             aux = F.cross_entropy(self.aux(pooled), labels)
-        keep = keep_loss(self.keep, student_hidden, teacher_hidden) if self.keep != "none" else zero
         field_ce = zero
         if self.field_embed is not None and labels is not None:
             # F.normalize runs in fp32 under autocast regardless of field_raw's dtype; match classes' dtype
@@ -227,7 +188,7 @@ class KICLIP(nn.Module):
             field_normed = F.normalize(field_raw, dim=-1).to(classes.dtype)
             field_logits = clip_logits(self.model, field_normed, classes, self.num_frames)
             field_ce = F.cross_entropy(field_logits, labels)
-        return logits, kd, aux, keep, field_ce
+        return logits, kd, aux, field_ce
 
 
 def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, num_classes: int = 0) -> KICLIP:
@@ -237,31 +198,24 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
     from_teacher = m.inject and m.inject_source == "teacher"
     distill = weights is None and m.distill_weight > 0
     aux = weights is None and m.aux_classifier
-    keep = m.l_keep if weights is None else "none"
-    fresh = weights is None
     field_needs_teacher = m.field_enabled and m.field_source in ("teacher", "both")
     pretrained = pretrained_state(m.arch) if weights is None or from_teacher or field_needs_teacher else None
     if weights is None:
         weights = with_frozen_copy(pretrained) if blocks else pretrained
     student = CLIP.from_state_dict(
         weights,
-        strict=not (m.motion and fresh),
         temporal=m.temporal,
         num_frames=cfg.data.num_frames,
         inject=blocks,
         grad_checkpointing=m.grad_checkpointing,
-        motion_site=m.motion_site if m.motion else None,
-        motion_dim=motion_dim(m.motion_source, weights["visual.conv1.weight"].shape[0]) if m.motion else 0,
-        motion_bottleneck=m.motion_bottleneck,
-        motion_blocks=m.motion_blocks,
     )
     teacher = (
-        CLIP.from_state_dict(pretrained) if distill or from_teacher or keep != "none" or field_needs_teacher
+        CLIP.from_state_dict(pretrained) if distill or from_teacher or field_needs_teacher
         else None
     )
     return KICLIP(
         student, cfg.data.num_frames, teacher, inject=from_teacher, distill=distill, alpha=m.residual_alpha,
-        aux=aux, num_classes=num_classes, keep=keep, motion_source=m.motion_source if m.motion else None,
+        aux=aux, num_classes=num_classes,
         field_source=m.field_source if m.field_enabled else None,
         field_segments=m.field_segments,
         field_pool_modes=tuple(m.field_pool_modes),

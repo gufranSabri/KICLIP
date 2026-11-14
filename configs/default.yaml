@@ -1,3 +1,4 @@
+
 # KICLIP defaults: ViT-B/16, 8x16 clips, the cross-dataset setting (all of K400 -> UCF101 / HMDB51 / K600).
 # configs/methods/froster.yaml switches knowledge injection off (FROSTER); kiclip_blocks.yaml is the original KICLIP.
 
@@ -9,8 +10,6 @@ model:
   distill_weight: 0.5 # 0 drops the distillation loss and the projectors
   residual_alpha: 0.1
   aux_classifier: false # a fresh MLP on the pooled video embedding, trained with CE alongside the rest of the loss
-  l_keep: none # keep every vision block near the teacher's; absolute: per-token cosine | geometric: batch sims | both
-  keep_weight: 1.0
   grad_checkpointing: false
 
 data:

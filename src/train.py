@@ -68,7 +68,7 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
     model.train()
     amp = cfg.train.amp and device.type == "cuda"
     steps = len(loader)
-    sums = torch.zeros(8, device=device)  # loss, ce, kd, aux, keep, field_ce, correct, videos
+    sums = torch.zeros(7, device=device)  # loss, ce, kd, aux, field_ce, correct, videos
 
     for step, (video, labels) in enumerate(
         progress(loader, desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main, total=steps)
@@ -81,15 +81,12 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         # one random template plus the bare description, redrawn every forward
         prompt = tokens[[random.randrange(len(TEMPLATES)), len(TEMPLATES)]]
         with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-            logits, kd, aux, keep, field_ce = model(video, prompt, labels)
+            logits, kd, aux, field_ce = model(video, prompt, labels)
             ce = F.cross_entropy(logits, labels)
-            loss = (
-                ce + cfg.model.distill_weight * kd + aux + cfg.model.keep_weight * keep
-                + cfg.model.field_ce_weight * field_ce
-            )
+            loss = ce + cfg.model.distill_weight * kd + aux + cfg.model.field_ce_weight * field_ce
         scaler.scale(loss).backward()
         sums += torch.stack([
-            loss.detach(), ce.detach(), kd.detach(), aux.detach(), keep.detach(), field_ce.detach(),
+            loss.detach(), ce.detach(), kd.detach(), aux.detach(), field_ce.detach(),
             (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
         ])
 
@@ -101,11 +98,11 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         scaler.step(optimizer)
         scaler.update()
 
-    loss, ce, kd, aux, keep, field_ce, correct, videos = dist.all_sum(sums.tolist(), device)
+    loss, ce, kd, aux, field_ce, correct, videos = dist.all_sum(sums.tolist(), device)
     total_steps = steps * dist.rank_world()[1]
     return {
         "loss": loss / total_steps, "ce": ce / total_steps, "kd": kd / total_steps, "aux": aux / total_steps,
-        "keep": keep / total_steps, "field_ce": field_ce / total_steps,
+        "field_ce": field_ce / total_steps,
         "top1": 100 * correct / max(videos, 1), "lr": lr, "field_lr": lr * field_lr_scale,
     }
 
@@ -137,16 +134,9 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
                 if m.inject else "off")
     logger.info("teacher      : %s", f"frozen {m.arch} | distill_weight {m.distill_weight:g} | "
                 f"residual_alpha {m.residual_alpha:g}"
-                if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") or m.l_keep != "none"
-                else "off")
+                if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") else "off")
     logger.info("aux classif. : %s", "a fresh MLP on the pooled video embedding, trained with CE"
                 if m.aux_classifier else "off")
-    keep_desc = {"absolute": "per-token cosine", "geometric": "batch class-token similarities", "both": "both"}
-    logger.info("keep (l_keep): %s", f"{keep_desc[m.l_keep]} on every vision block | keep_weight {m.keep_weight:g}"
-                if m.l_keep != "none" else "off")
-    site_desc = {"input": "added once before block 1", "blocks": f"added after blocks {m.motion_blocks}"}
-    logger.info("motion       : %s", f"{m.motion_source}, {site_desc[m.motion_site]} | "
-                f"bottleneck {m.motion_bottleneck} | motion_lr {m.motion_lr:.3g}" if m.motion else "off")
     logger.info("field        : %s", (
         f"source {m.field_source} | segments {m.field_segments} | pool_modes {m.field_pool_modes} | "
         f"dropout_p {m.field_dropout_p:g} | field_alpha {m.field_alpha:g} (on the final pooled embedding) | "
@@ -164,11 +154,9 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
 
 def log_param_counts(model: KICLIP) -> None:
     clip = model.model
-    motion_mods = [mod for mod in (clip.visual.motion_embed, clip.visual.transformer.motion_embed) if mod is not None]
     groups = [
         ("vision encoder", [clip.visual]),
         ("text encoder", [clip.transformer, clip.token_embedding, clip.ln_final]),
-        ("motion embedder", motion_mods),  # counted again here; already included in "vision encoder" above
         ("projectors", [p for p in (model.projector_v, model.projector_t) if p is not None]),
         ("aux classifier", [model.aux] if model.aux is not None else []),
         ("field embedder", [model.field_embed] if model.field_embed is not None else []),
@@ -232,8 +220,6 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         model = student
     field_lr_scale = cfg.model.field_lr / t.lr if cfg.model.field_enabled else 0.0
     lr_scales = []
-    if cfg.model.motion:
-        lr_scales.append((".motion_embed.", cfg.model.motion_lr / t.lr))
     if cfg.model.field_enabled:
         lr_scales.append(("field_embed.", field_lr_scale))
     optimizer = torch.optim.AdamW(
@@ -279,9 +265,9 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         val = f" | val {format_metrics(record['val'])}" if "val" in record else ""
         field_lr = f" (field {record['field_lr']:.2e})" if cfg.model.field_enabled else ""
         logger.info(
-            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, keep %.4f, field %.4f) | train top1 %.2f%s | "
+            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, field %.4f) | train top1 %.2f%s | "
             "lr %.2e%s | %.0fs",
-            epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["keep"],
+            epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"],
             record["field_ce"], record["top1"], val, record["lr"], field_lr, record["seconds"],
         )
         if main:
