@@ -15,6 +15,7 @@ VALID_TEMPORAL = ("expand",)
 VALID_INJECT_SOURCES = ("teacher", "blocks")
 VALID_FIELD_SOURCES = ("student", "teacher", "both")
 VALID_FIELD_POOL_MODES = ("mean", "max", "dropout")
+VALID_FIELD_TARGETS = ("label", "teacher", "both")
 CROSS_TEST = (
     "cross/ucf101/full", "cross/ucf101/split1", "cross/ucf101/split2", "cross/ucf101/split3",
     "cross/hmdb51/full", "cross/hmdb51/split1", "cross/hmdb51/split2", "cross/hmdb51/split3",
@@ -40,6 +41,8 @@ class ModelConfig:
     field_alpha: float = 0.1
     field_ce_weight: float = 1.0
     field_lr: float = 3.33e-5
+    field_target: str = "label"
+    field_tau: float = 1.0
 
 
 @dataclass
@@ -143,6 +146,10 @@ class Config:
             raise ValueError("model.field_ce_weight must be >= 0")
         if m.field_lr < 0:
             raise ValueError("model.field_lr must be >= 0")
+        if m.field_target not in VALID_FIELD_TARGETS:
+            raise ValueError(f"model.field_target must be one of {VALID_FIELD_TARGETS}, got {m.field_target!r}")
+        if m.field_tau <= 0:
+            raise ValueError("model.field_tau must be > 0")
 
         self.check_split(d.train, "data.train")
         if d.val is not None:

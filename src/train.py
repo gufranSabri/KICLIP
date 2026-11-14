@@ -140,7 +140,8 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
     logger.info("field        : %s", (
         f"source {m.field_source} | segments {m.field_segments} | pool_modes {m.field_pool_modes} | "
         f"dropout_p {m.field_dropout_p:g} | field_alpha {m.field_alpha:g} (on the final pooled embedding) | "
-        f"field_lr {m.field_lr:.3g} | field_ce_weight {m.field_ce_weight:g}"
+        f"field_lr {m.field_lr:.3g} | field_ce_weight {m.field_ce_weight:g} | target {m.field_target} "
+        f"(tau {m.field_tau:g})"
     ) if m.field_enabled else "off")
 
     _section("optimisation")

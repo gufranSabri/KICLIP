@@ -34,6 +34,18 @@ def distillation_loss(
     )
 
 
+def field_loss(
+    logits: torch.Tensor, labels: torch.Tensor, target: str, tau: float, teacher_logits: torch.Tensor | None
+) -> torch.Tensor:
+    # label: CE on the base labels | teacher: KL to the frozen teacher's softened class distribution | both: their sum
+    loss = F.cross_entropy(logits, labels) if target in ("label", "both") else logits.new_zeros((), dtype=torch.float32)
+    if target in ("teacher", "both"):
+        student = F.log_softmax(logits.float() / tau, dim=-1)
+        teacher = F.log_softmax(teacher_logits.float() / tau, dim=-1)
+        loss = loss + tau ** 2 * F.kl_div(student, teacher, reduction="batchmean", log_target=True)
+    return loss
+
+
 def residual_projector(dim: int) -> nn.Sequential:
     proj = nn.Sequential(nn.Linear(dim, dim, bias=False), nn.GELU(), nn.Linear(dim, dim, bias=False))
     nn.init.kaiming_normal_(proj[0].weight)
@@ -67,11 +79,17 @@ class KICLIP(nn.Module):
         field_dropout_p: float = 0.3,
         field_alpha: float = 0.1,
         field_ce_weight: float = 1.0,
+        field_target: str = "label",
+        field_tau: float = 1.0,
     ):
         super().__init__()
-        needs_teacher = inject or distill or field_source in ("teacher", "both")
+        needs_teacher = (
+            inject or distill or field_source in ("teacher", "both") or (field_source is not None and field_target != "label")
+        )
         if needs_teacher and teacher is None:
-            raise ValueError("injecting from the teacher, distilling and field_source=teacher/both need a teacher")
+            raise ValueError(
+                "injecting from the teacher, distilling, field_source=teacher/both and field_target=teacher/both need a teacher"
+            )
         self.model, self.num_frames, self.inject, self.alpha = model, num_frames, inject, alpha
         self.teacher = teacher.eval().requires_grad_(False) if teacher is not None else None
         self.projector_v = residual_projector(model.embed_dim) if distill else None
@@ -81,6 +99,7 @@ class KICLIP(nn.Module):
         self.field_source = field_source
         self.field_segments, self.field_pool_modes = field_segments, list(field_pool_modes)
         self.field_dropout_p, self.field_alpha, self.field_ce_weight = field_dropout_p, field_alpha, field_ce_weight
+        self.field_target, self.field_tau = field_target, field_tau
         field_channels = 2 if field_source == "both" else 1
         # field_embed's output serves both as its own classifier (field_ce) and, scaled by field_alpha, as a
         # residual correction on the FINAL embedding (forward) -- not mid-stack, where downstream blocks' own
@@ -167,9 +186,11 @@ class KICLIP(nn.Module):
         zero = torch.zeros((), device=logits.device)
         pooled_frames = frames
         kd = zero
-        if self.projector_v is not None:
+        teacher_classes = None
+        if self.projector_v is not None or (self.field_embed is not None and self.field_target != "label"):
             with torch.no_grad():
                 teacher_classes = class_features(self.teacher, tokens)
+        if self.projector_v is not None:
             pooled_frames = frames + self.alpha * self.projector_v(frames)
             kd = distillation_loss(
                 pooled_frames,
@@ -187,7 +208,12 @@ class KICLIP(nn.Module):
             # before the matmul in clip_logits, which autocast does NOT upcast for us here
             field_normed = F.normalize(field_raw, dim=-1).to(classes.dtype)
             field_logits = clip_logits(self.model, field_normed, classes, self.num_frames)
-            field_ce = F.cross_entropy(field_logits, labels)
+            teacher_logits = None
+            if self.field_target != "label":
+                with torch.no_grad():
+                    teacher_logits = clip_logits(self.teacher, teacher_frames.to(teacher_classes.dtype), teacher_classes,
+                                                 self.num_frames)
+            field_ce = field_loss(field_logits, labels, self.field_target, self.field_tau, teacher_logits)
         return logits, kd, aux, field_ce
 
 
@@ -199,6 +225,9 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
     distill = weights is None and m.distill_weight > 0
     aux = weights is None and m.aux_classifier
     field_needs_teacher = m.field_enabled and m.field_source in ("teacher", "both")
+    # the teacher target only shapes field_ce during training; a checkpoint under test never needs it
+    field_target = m.field_target if weights is None else "label"
+    field_needs_teacher = field_needs_teacher or (m.field_enabled and field_target != "label")
     pretrained = pretrained_state(m.arch) if weights is None or from_teacher or field_needs_teacher else None
     if weights is None:
         weights = with_frozen_copy(pretrained) if blocks else pretrained
@@ -222,4 +251,6 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
         field_dropout_p=m.field_dropout_p,
         field_alpha=m.field_alpha,
         field_ce_weight=m.field_ce_weight,
+        field_target=field_target,
+        field_tau=m.field_tau,
     )
