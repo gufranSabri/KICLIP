@@ -34,7 +34,7 @@ for METHOD in "${METHODS[@]}"; do
 
     TODO=()
     for SPLIT in "${SPLITS[@]}"; do
-        if [[ "$RERUN" != "1" && -f "runs/$RUN/test_${SPLIT//\//_}.json" ]]; then
+        if [[ "$RERUN" != "1" ]] && grep -qs "\"${SPLIT#*/}\":" "runs/$RUN/results.json"; then
             echo "  [skip] test $SPLIT (result exists; RERUN=1 to force)"
         else
             TODO+=("$SPLIT")

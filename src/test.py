@@ -15,11 +15,30 @@ from src.models.clip import has_injection
 from src.models.kiclip import KICLIP, build_kiclip, class_features, clip_logits
 from src.utils import dist
 from src.utils.logger import get_logger
-from src.utils.metrics import format_metrics
+from src.utils.metrics import format_metrics, harmonic_mean
 from src.utils.progress import progress
 from src.utils.seed import seed_everything
 
 logger = get_logger(__name__)
+
+RESULTS = "results.json"
+
+
+def result_key(split: str) -> str:
+    # b2n splits by their set (base / novel), any other split by dataset/set
+    protocol, dataset, name = split.split("/")
+    return name if protocol == "b2n" else f"{dataset}/{name}"
+
+
+def write_results(dest: Path, metrics: dict[str, dict]) -> dict:
+    # merges into dest so tests of different splits share one file; HM whenever base and novel are both there
+    old = json.loads(dest.read_text()) if dest.exists() else {}
+    results = {k: v for k, v in old.items() if isinstance(v, dict) and set(v) == {"top1", "top5"}}
+    results.update({result_key(s): {"top1": m["top1"], "top5": m["top5"]} for s, m in metrics.items()})
+    if "base" in results and "novel" in results:
+        results["HM"] = harmonic_mean(results["base"]["top1"], results["novel"]["top1"])
+    dest.write_text(json.dumps(results, indent=2))
+    return results
 
 
 @torch.no_grad()
@@ -143,17 +162,10 @@ def test(cfg: Config, checkpoint: str | Path, splits: list[str] | None = None) -
         dataset = VideoDataset(cfg, split, train=False, views=cfg.test.views)
         metrics = evaluate(model, dataset, tokenize(dataset.classnames), cfg, device, desc=split)
         logger.info("TEST %-22s | %s", split, format_metrics(metrics))
-        if rank == 0:
-            dest = path.parent / f"test_{split.replace('/', '_')}.json"
-            dest.write_text(json.dumps({
-                "split": split,
-                "checkpoint": str(path),
-                "classes": len(dataset.classnames),
-                "views": cfg.test.views,
-                "metrics": metrics,
-            }, indent=2))
-            logger.info("wrote %s", dest)
         results[split] = metrics
+        if rank == 0:
+            saved = write_results(path.parent / RESULTS, {split: metrics})
+            logger.info("wrote %s%s", path.parent / RESULTS, f" | HM {saved['HM']:.2f}" if "HM" in saved else "")
 
     dist.cleanup()
     return results

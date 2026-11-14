@@ -33,7 +33,7 @@ for METHOD in "${METHODS[@]}"; do
                 continue
             fi
 
-            if [[ "$RERUN" != "1" && -f "runs/$RUN/test_b2n_${DS}_base.json" && -f "runs/$RUN/test_b2n_${DS}_novel.json" ]]; then
+            if [[ "$RERUN" != "1" ]] && grep -qs '"HM"' "runs/$RUN/results.json"; then
                 echo "  [skip] test runs/$RUN (base and novel results exist; RERUN=1 to force)"
             else
                 $LAUNCH kiclip.py "${CONFIGS[@]}" test --checkpoint "runs/$RUN/averaged.pt"

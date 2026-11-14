@@ -18,23 +18,30 @@ def load_runs(runs_root: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
 
-        tests = {}
-        for f in sorted(run_dir.glob("test_*.json")):
-            try:
-                payload = json.loads(f.read_text())
-            except json.JSONDecodeError:
-                continue
-            tests[payload["split"]] = payload["metrics"]
-
         runs.append({
             "run": run_dir.name,
             "train": cfg["data"]["train"],
             "arch": cfg["model"]["arch"],
             "method": method(cfg),
             "done": (run_dir / "averaged.pt").exists(),
-            "tests": tests,
+            "tests": load_tests(run_dir / "results.json", cfg["data"]["train"]),
         })
     return runs
+
+
+def load_tests(path: Path, train: str) -> dict[str, dict]:
+    # results.json keys (base, novel, <dataset>/<set>) back to full split names; HM is recomputed by the tables
+    if not path.exists():
+        return {}
+    try:
+        results = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    protocol, dataset = train.split("/")[:2]
+    return {
+        f"{protocol}/{key}" if "/" in key else f"{protocol}/{dataset}/{key}": m
+        for key, m in results.items() if isinstance(m, dict) and set(m) == {"top1", "top5"}
+    }
 
 
 METHODS = ("kiclip_aux", "kiclip", "kiclip_blocks", "froster")

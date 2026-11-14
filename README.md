@@ -117,8 +117,8 @@ python kiclip.py --config configs/cross/k400.yaml test --checkpoint runs/cross_k
 ```
 
 `--config` can be repeated (later files win) and `--set key=value` overrides any key, on either side of the
-subcommand. `test` evaluates `data.test` unless `--splits` is given and writes `test_<split>.json` next to the
-checkpoint. It also loads the original FROSTER and KICLIP releases (`swa_2_22.pth`, the latter with
+subcommand. `test` evaluates `data.test` unless `--splits` is given and merges every split's top1/top5 into one
+`results.json` next to the checkpoint: `base`, `novel` and `HM` for base-to-novel, `<dataset>/<set>` otherwise. It also loads the original FROSTER and KICLIP releases (`swa_2_22.pth`, the latter with
 `configs/methods/kiclip_blocks.yaml`). `test` checks that the config injects the way the checkpoint was trained.
 
 Multi-GPU runs go through `torchrun`; `train.batch_size` is global and split evenly across GPUs per step, as in
@@ -129,7 +129,7 @@ torchrun --standalone --nproc_per_node=4 kiclip.py --config configs/cross/k400.y
 ```
 
 A run directory holds `config.json`, `train.log`, `history.json`, a code snapshot, `last.pt` while training
-(rerunning the same command resumes from it) and `averaged.pt` + `results.json` at the end.
+(rerunning the same command resumes from it), `averaged.pt` at the end and `results.json` once tested.
 
 ## EigenCAM
 

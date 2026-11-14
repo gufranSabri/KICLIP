@@ -227,7 +227,7 @@ def legend_runs(ax, runs: list[Run], styles: bool = False) -> None:
 
 
 def sanity(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("0. Sanity", "Top-1 recomputed from the dumped fp16 embeddings against each run's test json; "
+    rep.section("0. Sanity", "Top-1 recomputed from the dumped fp16 embeddings against each run's results.json; "
                 "for field runs, cosine between the dumped field and field_embed re-applied to the dumped pooled input.")
     rows = []
     for r in runs:
@@ -235,15 +235,15 @@ def sanity(rep: Report, runs: list[Run], sp: dict) -> None:
             ours = top1(r.logits(sp[key]), r.y(sp[key]))
             ref = "-"
             if r.run_dir() is not None:
-                path = r.run_dir() / f"test_{sp[key].replace('/', '_')}.json"
+                path = r.run_dir() / "results.json"
                 if path.exists():
-                    ref = json.loads(path.read_text())["metrics"]["top1"]
+                    ref = json.loads(path.read_text()).get(key, {}).get("top1", "-")
             recompute = "-"
             if r.has_field:
                 s = r.splits[sp[key]]
                 recompute = F.cosine_similarity(field_apply(r.field_embed, s["pooled"]), s["field"].float(), dim=-1).mean().item()
             rows.append([r.name, key, ours, ref, recompute])
-    rep.table(["run", "split", "top1 (dump)", "top1 (test json)", "field recompute cos"], rows)
+    rep.table(["run", "split", "top1 (dump)", "top1 (results.json)", "field recompute cos"], rows)
 
 
 def accuracy(rep: Report, runs: list[Run], sp: dict) -> None:

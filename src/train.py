@@ -186,6 +186,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         snapshot_code(run_dir)
         setup_logging(log_file=run_dir / "train.log")
         (run_dir / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+        (run_dir / "results.json").unlink(missing_ok=True)  # test results of an earlier checkpoint in this dir
     else:
         logging.getLogger().setLevel(logging.WARNING)
     dist.barrier()
@@ -295,7 +296,6 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
             "averaged_epochs": [t.average_from, average_to],
             "classes": train_set.classnames,
         }, run_dir / "averaged.pt")
-        (run_dir / "results.json").write_text(json.dumps(results, indent=2))
         last.unlink(missing_ok=True)
         logger.info("averaged %d epoch(s) into %s", averaged, run_dir / "averaged.pt")
     dist.barrier()
