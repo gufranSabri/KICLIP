@@ -46,7 +46,8 @@ train:
   weight_decay: 0.01
   grad_clip: 1.0
   amp: true
-  average_from: 2 # averaged.pt = mean of the weights after epochs average_from..epochs
+  average_from: 3 # averaged.pt = mean of the weights over epochs average_from..average_to
+  average_to: null # null = train.epochs (the final epoch)
   eval_every: 0 # epochs between val passes, 0 = never
 
 test:

@@ -6,4 +6,7 @@ def harmonic_mean(a: float, b: float) -> float:
 
 
 def format_metrics(m: dict) -> str:
-    return f"top1 {m['top1']:6.2f} | top5 {m['top5']:6.2f} | n={m['n']}"
+    base = f"top1 {m['top1']:6.2f} | top5 {m['top5']:6.2f} | n={m['n']}"
+    if "field_top1" in m:
+        base += f" | field top1 {m['field_top1']:6.2f} top5 {m['field_top5']:6.2f}"
+    return base

@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from src.config import VALID_ARCHS
+from src.models.motion import MotionEmbedder
 
 
 def pretrained_state(arch: str) -> dict[str, torch.Tensor]:
@@ -104,6 +105,9 @@ class Transformer(nn.Module):
         num_frames: int = 1,
         inject: bool = False,
         grad_checkpointing: bool = False,
+        motion_blocks: list[int] | None = None,
+        motion_dim: int = 0,
+        motion_bottleneck: int = 64,
     ):
         super().__init__()
         self.grad_checkpointing = grad_checkpointing
@@ -115,13 +119,20 @@ class Transformer(nn.Module):
             nn.ModuleList(ResidualAttentionBlock(width, heads, causal) for _ in range(layers)).requires_grad_(False)
             if inject else None
         )
+        # motion injection: an additive residual after the listed blocks, each with its own low-capacity embedder
+        self.motion_blocks = motion_blocks or []
+        self.motion_embed = nn.ModuleDict({
+            str(i): MotionEmbedder(motion_dim, width, motion_bottleneck) for i in self.motion_blocks
+        }) if self.motion_blocks else None
 
     def _run(self, block: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if self.grad_checkpointing and torch.is_grad_enabled():
             return checkpoint(block, x, use_reentrant=False)
         return block(x)
 
-    def forward(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> torch.Tensor:  # (N, L, D)
+    def forward(
+        self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None, motion: torch.Tensor | None = None
+    ) -> torch.Tensor:  # (N, L, D)
         # frozen: another model's input to every block (see trace), averaged in before the block like resblocks_f's
         t = x
         for i, block in enumerate(self.resblocks):
@@ -130,6 +141,8 @@ class Transformer(nn.Module):
             elif frozen is not None:
                 x = (x + frozen[i]) / 2
             x = self._run(block, x)
+            if self.motion_embed is not None and i in self.motion_blocks:
+                x = x + F.pad(self.motion_embed[str(i)](motion), (0, 0, 1, 0))  # zero row for the CLS position
         return x
 
     def trace(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:  # output and every block's input
@@ -165,9 +178,13 @@ class VisionTransformer(nn.Module):
         num_frames: int = 1,
         inject: bool = False,
         grad_checkpointing: bool = False,
+        motion_site: str | None = None,
+        motion_dim: int = 0,
+        motion_bottleneck: int = 64,
+        motion_blocks: list[int] | None = None,
     ):
         super().__init__()
-        self.resolution = resolution
+        self.resolution, self.motion_site = resolution, motion_site
         scale = width ** -0.5
         self.conv1 = nn.Conv2d(3, width, patch_size, patch_size, bias=False)
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
@@ -176,11 +193,16 @@ class VisionTransformer(nn.Module):
         self.transformer = Transformer(
             width, layers, heads, temporal=temporal, num_frames=num_frames, inject=inject,
             grad_checkpointing=grad_checkpointing,
+            motion_blocks=motion_blocks if motion_site == "blocks" else None,
+            motion_dim=motion_dim, motion_bottleneck=motion_bottleneck,
         )
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+        self.motion_embed = (
+            MotionEmbedder(motion_dim, width, motion_bottleneck) if motion_site == "input" else None
+        )
 
-    def embed(self, x: torch.Tensor) -> torch.Tensor:  # (N, 3, R, R) -> (N, 1 + P, W), the first block's input
+    def embed(self, x: torch.Tensor, motion: torch.Tensor | None = None) -> torch.Tensor:  # -> (N, 1 + P, W)
         if x.shape[-2:] != (self.resolution, self.resolution):
             raise ValueError(
                 f"expected {self.resolution}px frames, got {tuple(x.shape[-2:])}; set data.crop_size={self.resolution}"
@@ -188,21 +210,29 @@ class VisionTransformer(nn.Module):
         x = self.conv1(x).flatten(2).transpose(1, 2)                       # (N, P, W)
         cls = self.class_embedding.to(x.dtype).expand(x.shape[0], 1, -1)
         x = torch.cat([cls, x], 1) + self.positional_embedding.to(x.dtype)  # (N, 1 + P, W)
-        return self.ln_pre(x)
+        x = self.ln_pre(x)
+        if self.motion_embed is not None:
+            embedded = self.motion_embed(motion)                           # (N, P, W)
+            x = x + F.pad(embedded, (0, 0, 1, 0))                          # zero row for the CLS position
+        return x
 
     def head(self, x: torch.Tensor) -> torch.Tensor:  # (N, 1 + P, W) -> (N, D)
         return self.ln_post(x[:, 0]) @ self.proj
 
-    def forward(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> torch.Tensor:  # -> (N, D)
-        return self.head(self.transformer(self.embed(x), frozen))
+    def forward(
+        self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None, motion: torch.Tensor | None = None
+    ) -> torch.Tensor:  # -> (N, D)
+        return self.head(self.transformer(self.embed(x, motion), frozen, motion))
 
     def trace(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:  # (N, D) and every block's input
         x, inputs = self.transformer.trace(self.embed(x))
         return self.head(x), inputs
 
-    def hidden(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> list[torch.Tensor]:
+    def hidden(
+        self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None, motion: torch.Tensor | None = None
+    ) -> list[torch.Tensor]:
         # every block's own output, (N, 1 + P, W) each
-        return self.transformer.hidden(self.embed(x), frozen)
+        return self.transformer.hidden(self.embed(x, motion), frozen)
 
 
 class CLIP(nn.Module):
@@ -222,11 +252,17 @@ class CLIP(nn.Module):
         num_frames: int = 1,
         inject: bool = False,
         grad_checkpointing: bool = False,
+        motion_site: str | None = None,
+        motion_dim: int = 0,
+        motion_bottleneck: int = 64,
+        motion_blocks: list[int] | None = None,
     ):
         super().__init__()
         self.visual = VisionTransformer(
             resolution, patch_size, vision_width, vision_layers, vision_width // 64, embed_dim,
             temporal=temporal, num_frames=num_frames, inject=inject, grad_checkpointing=grad_checkpointing,
+            motion_site=motion_site, motion_dim=motion_dim, motion_bottleneck=motion_bottleneck,
+            motion_blocks=motion_blocks,
         )
         self.transformer = Transformer(
             text_width, text_layers, text_heads, causal=True, grad_checkpointing=grad_checkpointing
@@ -238,9 +274,9 @@ class CLIP(nn.Module):
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
 
     @classmethod
-    def from_state_dict(cls, state: dict[str, torch.Tensor], **kwargs) -> CLIP:
+    def from_state_dict(cls, state: dict[str, torch.Tensor], strict: bool = True, **kwargs) -> CLIP:
         model = cls(**_dims(state), **kwargs)
-        model.load_state_dict(state)
+        model.load_state_dict(state, strict=strict)
         return model
 
     @property

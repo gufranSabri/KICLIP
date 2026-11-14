@@ -34,13 +34,23 @@ def lr_at(cfg: Config, epoch: float) -> float:
     return t.end_lr + (t.lr - t.end_lr) * (1 + math.cos(math.pi * frac)) / 2
 
 
-def param_groups(model: torch.nn.Module, weight_decay: float) -> list[dict]:
-    # biases and 1-D params skip weight decay; logit_scale is 0-D and keeps it, as in FROSTER
-    decay, no_decay = [], []
+def param_groups(model: torch.nn.Module, weight_decay: float, lr_scales: list[tuple[str, float]] | None = None) -> list[dict]:
+    # biases and 1-D params skip weight decay; logit_scale is 0-D and keeps it, as in FROSTER;
+    # params whose name matches a (substring, scale) pair in lr_scales get their own two groups, scaled
+    # relative to train.lr every step; everything else uses scale 1.0, first match wins
+    lr_scales = lr_scales or []
+    buckets: dict[float, tuple[list, list]] = {1.0: ([], [])}
     for name, p in model.named_parameters():
-        if p.requires_grad:
-            (no_decay if p.ndim == 1 or name.endswith(".bias") else decay).append(p)
-    return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+        if not p.requires_grad:
+            continue
+        scale = next((s for pattern, s in lr_scales if pattern in name), 1.0)
+        decay, no_decay = buckets.setdefault(scale, ([], []))
+        (no_decay if p.ndim == 1 or name.endswith(".bias") else decay).append(p)
+    groups = []
+    for scale, (decay, no_decay) in buckets.items():
+        groups.append({"params": decay, "weight_decay": weight_decay, "lr_scale": scale})
+        groups.append({"params": no_decay, "weight_decay": 0.0, "lr_scale": scale})
+    return groups
 
 
 def _accumulate(average: dict | None, model: torch.nn.Module, n: int) -> dict:
@@ -53,30 +63,33 @@ def _accumulate(average: dict | None, model: torch.nn.Module, n: int) -> dict:
 
 
 def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: int,
-                device: torch.device, main: bool) -> dict:
+                device: torch.device, main: bool, field_lr_scale: float = 0.0) -> dict:
     # no gradient accumulation, as in reference/KICLIP: every batch is one optimizer step
     model.train()
     amp = cfg.train.amp and device.type == "cuda"
     steps = len(loader)
-    sums = torch.zeros(7, device=device)  # loss, ce, kd, aux, keep, correct, videos
+    sums = torch.zeros(8, device=device)  # loss, ce, kd, aux, keep, field_ce, correct, videos
 
     for step, (video, labels) in enumerate(
         progress(loader, desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main, total=steps)
     ):
         lr = lr_at(cfg, epoch + step / steps)
         for group in optimizer.param_groups:
-            group["lr"] = lr
+            group["lr"] = lr * group["lr_scale"]
         optimizer.zero_grad(set_to_none=True)
         video, labels = video.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         # one random template plus the bare description, redrawn every forward
         prompt = tokens[[random.randrange(len(TEMPLATES)), len(TEMPLATES)]]
         with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-            logits, kd, aux, keep = model(video, prompt, labels)
+            logits, kd, aux, keep, field_ce = model(video, prompt, labels)
             ce = F.cross_entropy(logits, labels)
-            loss = ce + cfg.model.distill_weight * kd + aux + cfg.model.keep_weight * keep
+            loss = (
+                ce + cfg.model.distill_weight * kd + aux + cfg.model.keep_weight * keep
+                + cfg.model.field_ce_weight * field_ce
+            )
         scaler.scale(loss).backward()
         sums += torch.stack([
-            loss.detach(), ce.detach(), kd.detach(), aux.detach(), keep.detach(),
+            loss.detach(), ce.detach(), kd.detach(), aux.detach(), keep.detach(), field_ce.detach(),
             (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
         ])
 
@@ -88,11 +101,12 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         scaler.step(optimizer)
         scaler.update()
 
-    loss, ce, kd, aux, keep, correct, videos = dist.all_sum(sums.tolist(), device)
+    loss, ce, kd, aux, keep, field_ce, correct, videos = dist.all_sum(sums.tolist(), device)
     total_steps = steps * dist.rank_world()[1]
     return {
         "loss": loss / total_steps, "ce": ce / total_steps, "kd": kd / total_steps, "aux": aux / total_steps,
-        "keep": keep / total_steps, "top1": 100 * correct / max(videos, 1), "lr": lr,
+        "keep": keep / total_steps, "field_ce": field_ce / total_steps,
+        "top1": 100 * correct / max(videos, 1), "lr": lr, "field_lr": lr * field_lr_scale,
     }
 
 
@@ -130,6 +144,14 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
     keep_desc = {"absolute": "per-token cosine", "geometric": "batch class-token similarities", "both": "both"}
     logger.info("keep (l_keep): %s", f"{keep_desc[m.l_keep]} on every vision block | keep_weight {m.keep_weight:g}"
                 if m.l_keep != "none" else "off")
+    site_desc = {"input": "added once before block 1", "blocks": f"added after blocks {m.motion_blocks}"}
+    logger.info("motion       : %s", f"{m.motion_source}, {site_desc[m.motion_site]} | "
+                f"bottleneck {m.motion_bottleneck} | motion_lr {m.motion_lr:.3g}" if m.motion else "off")
+    logger.info("field        : %s", (
+        f"source {m.field_source} | segments {m.field_segments} | pool_modes {m.field_pool_modes} | "
+        f"dropout_p {m.field_dropout_p:g} | field_alpha {m.field_alpha:g} (on the final pooled embedding) | "
+        f"field_lr {m.field_lr:.3g} | field_ce_weight {m.field_ce_weight:g}"
+    ) if m.field_enabled else "off")
 
     _section("optimisation")
     logger.info("batch        : %d = %d per GPU x %d GPU(s), no accumulation", t.batch_size, per_gpu_batch, world)
@@ -137,16 +159,19 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
     logger.info("lr           : %.3g | warmup %g epochs from %.3g | cosine to %.3g",
                 t.lr, t.warmup_epochs, t.warmup_start_lr, t.end_lr)
     logger.info("regularise   : weight_decay %g | grad_clip %g | amp %s", t.weight_decay, t.grad_clip, t.amp)
-    logger.info("average      : epochs %d..%d -> averaged.pt", t.average_from, t.epochs)
+    logger.info("average      : epochs %d..%d -> averaged.pt", t.average_from, t.average_to or t.epochs)
 
 
 def log_param_counts(model: KICLIP) -> None:
     clip = model.model
+    motion_mods = [mod for mod in (clip.visual.motion_embed, clip.visual.transformer.motion_embed) if mod is not None]
     groups = [
         ("vision encoder", [clip.visual]),
         ("text encoder", [clip.transformer, clip.token_embedding, clip.ln_final]),
+        ("motion embedder", motion_mods),  # counted again here; already included in "vision encoder" above
         ("projectors", [p for p in (model.projector_v, model.projector_t) if p is not None]),
         ("aux classifier", [model.aux] if model.aux is not None else []),
+        ("field embedder", [model.field_embed] if model.field_embed is not None else []),
     ]
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     for name, mods in groups:
@@ -205,7 +230,15 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         model = DistributedDataParallel(student, device_ids=[device.index] if device.type == "cuda" else None)
     else:
         model = student
-    optimizer = torch.optim.AdamW(param_groups(student, t.weight_decay), lr=t.lr, betas=(0.9, 0.999), eps=1e-8)
+    field_lr_scale = cfg.model.field_lr / t.lr if cfg.model.field_enabled else 0.0
+    lr_scales = []
+    if cfg.model.motion:
+        lr_scales.append((".motion_embed.", cfg.model.motion_lr / t.lr))
+    if cfg.model.field_enabled:
+        lr_scales.append(("field_embed.", field_lr_scale))
+    optimizer = torch.optim.AdamW(
+        param_groups(student, t.weight_decay, lr_scales), lr=t.lr, betas=(0.9, 0.999), eps=1e-8
+    )
     scaler = torch.amp.GradScaler(device.type, enabled=t.amp and device.type == "cuda")
 
     if main:
@@ -233,9 +266,9 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
             sampler.set_epoch(epoch)
         t0 = time.time()
         record = {"epoch": epoch + 1, **train_epoch(
-            model, loader, tokens, optimizer, scaler, cfg, epoch, device, main
+            model, loader, tokens, optimizer, scaler, cfg, epoch, device, main, field_lr_scale
         )}
-        if main and epoch + 1 >= t.average_from:
+        if main and t.average_from <= epoch + 1 <= (t.average_to or t.epochs):
             averaged += 1
             average = _accumulate(average, student, averaged)
         if val_set is not None and (epoch + 1) % t.eval_every == 0:
@@ -244,10 +277,12 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         history.append(record)
 
         val = f" | val {format_metrics(record['val'])}" if "val" in record else ""
+        field_lr = f" (field {record['field_lr']:.2e})" if cfg.model.field_enabled else ""
         logger.info(
-            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, keep %.4f) | train top1 %.2f%s | lr %.2e | %.0fs",
-            epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["keep"], record["top1"],
-            val, record["lr"], record["seconds"],
+            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, keep %.4f, field %.4f) | train top1 %.2f%s | "
+            "lr %.2e%s | %.0fs",
+            epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"], record["keep"],
+            record["field_ce"], record["top1"], val, record["lr"], field_lr, record["seconds"],
         )
         if main:
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
@@ -263,13 +298,14 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
             }, last)
 
     # ---- weight averaging -----------------------------------------------
-    results = {"averaged_epochs": [t.average_from, t.epochs], "last_epoch": history[-1]}
+    average_to = t.average_to or t.epochs
+    results = {"averaged_epochs": [t.average_from, average_to], "last_epoch": history[-1]}
     if main:
         _section("weight averaging")
         torch.save({
             "model": average,
             "config": cfg.to_dict(),
-            "averaged_epochs": [t.average_from, t.epochs],
+            "averaged_epochs": [t.average_from, average_to],
             "classes": train_set.classnames,
         }, run_dir / "averaged.pt")
         (run_dir / "results.json").write_text(json.dumps(results, indent=2))

@@ -1,0 +1,12 @@
+# structured field: stochastically-pooled per-block activations feed an open-vocabulary field embedder, whose
+# output is both its own classifier (field_ce) and a residual correction on the FINAL pooled video embedding --
+# not mid-stack, where downstream pretrained blocks' own biases would silently erase the correction (see field.py)
+model:
+  field_enabled: true
+  field_source: student # student | teacher | both
+  field_segments: 64 # pooled feature-dim size (M); the width must be divisible by this
+  field_pool_modes: [mean, max, dropout] # resampled once per training step; one of mean|max|min|strided|dropout each; eval always uses mean
+  field_dropout_p: 0.3 # dropout pool mode only: fraction zeroed per segment before the rescaled survivor mean
+  field_alpha: 0.5 # frames = frames + field_alpha * field_embed(field); zero-init last layer, so this starts as a no-op
+  field_ce_weight: 1.0 # weight of the field classifier's own CE loss in the total loss
+  field_lr: 3.33e-4 # separate LR for field_embed params

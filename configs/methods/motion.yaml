@@ -1,0 +1,5 @@
+# motion-conditioned injection: frame-to-frame motion fed into the vision encoder through a low-capacity embedder
+model:
+  motion: true
+  motion_source: rgb_diff # rgb_diff | embed_diff
+  motion_site: input # input | blocks

@@ -21,7 +21,8 @@ def load_vision_model(spec: str, cfg: Config) -> KICLIP:
         return KICLIP(CLIP.from_state_dict(pretrained_state(cfg.model.arch)), cfg.data.num_frames).eval()
     from src.test import injection, load_weights
 
-    weights, ckpt_cfg = load_weights(Path(spec))
+    state, ckpt_cfg = load_weights(Path(spec))
+    weights = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
     if ckpt_cfg is None:  # the original releases inject from frozen block copies, if at all
         temporal, num_frames = cfg.model.temporal, cfg.data.num_frames
         source = "blocks" if has_injection(weights) else None
@@ -31,7 +32,9 @@ def load_vision_model(spec: str, cfg: Config) -> KICLIP:
     if num_frames != cfg.data.num_frames:
         raise ValueError(f"{spec} was trained on {num_frames}-frame clips; pass --set data.num_frames={num_frames}")
     model = replace(cfg.model, temporal=temporal, inject=source is not None, inject_source=source or "teacher")
-    return build_kiclip(replace(cfg, model=model), weights).eval()
+    kiclip = build_kiclip(replace(cfg, model=model), weights)
+    kiclip.load_state_dict(state, strict=False)
+    return kiclip.eval()
 
 
 def load_clip(path: Path, cfg: Config, view: int) -> tuple[torch.Tensor, np.ndarray]:

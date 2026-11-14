@@ -14,6 +14,10 @@ VALID_ARCHS = ("ViT-B-32", "ViT-B-16", "ViT-L-14")
 VALID_TEMPORAL = ("expand",)
 VALID_INJECT_SOURCES = ("teacher", "blocks")
 VALID_KEEP = ("none", "absolute", "geometric", "both")
+VALID_MOTION_SOURCES = ("rgb_diff", "embed_diff")
+VALID_MOTION_SITES = ("input", "blocks")
+VALID_FIELD_SOURCES = ("student", "teacher", "both")
+VALID_FIELD_POOL_MODES = ("mean", "max", "min", "strided", "dropout")
 CROSS_TEST = (
     "cross/ucf101/full", "cross/ucf101/split1", "cross/ucf101/split2", "cross/ucf101/split3",
     "cross/hmdb51/full", "cross/hmdb51/split1", "cross/hmdb51/split2", "cross/hmdb51/split3",
@@ -33,6 +37,20 @@ class ModelConfig:
     l_keep: str = "none"
     keep_weight: float = 1.0
     grad_checkpointing: bool = False
+    motion: bool = False
+    motion_source: str = "rgb_diff"
+    motion_site: str = "input"
+    motion_blocks: list[int] = field(default_factory=lambda: [6, 9, 12])
+    motion_bottleneck: int = 64
+    motion_lr: float = 3.33e-5
+    field_enabled: bool = False
+    field_source: str = "student"
+    field_segments: int = 64
+    field_pool_modes: list[str] = field(default_factory=lambda: ["mean", "max", "dropout"])
+    field_dropout_p: float = 0.3
+    field_alpha: float = 0.1
+    field_ce_weight: float = 1.0
+    field_lr: float = 3.33e-5
 
 
 @dataclass
@@ -61,6 +79,7 @@ class TrainConfig:
     grad_clip: float = 1.0
     amp: bool = True
     average_from: int = 2
+    average_to: int | None = None  # null = train.epochs
     eval_every: int = 0
 
 
@@ -122,6 +141,35 @@ class Config:
             raise ValueError(f"model.l_keep must be one of {VALID_KEEP}, got {m.l_keep!r}")
         if m.keep_weight < 0:
             raise ValueError("model.keep_weight must be >= 0")
+        if m.motion_source not in VALID_MOTION_SOURCES:
+            raise ValueError(f"model.motion_source must be one of {VALID_MOTION_SOURCES}, got {m.motion_source!r}")
+        if m.motion_site not in VALID_MOTION_SITES:
+            raise ValueError(f"model.motion_site must be one of {VALID_MOTION_SITES}, got {m.motion_site!r}")
+        if m.motion_site == "blocks" and not m.motion_blocks:
+            raise ValueError("model.motion_blocks must be non-empty when model.motion_site == 'blocks'")
+        if m.motion_bottleneck < 1:
+            raise ValueError("model.motion_bottleneck must be >= 1")
+        if m.motion_lr < 0:
+            raise ValueError("model.motion_lr must be >= 0")
+        if m.motion and m.motion_site == "blocks" and m.l_keep != "none":
+            raise ValueError("model.motion with motion_site=blocks does not support model.l_keep yet")
+        if m.field_source not in VALID_FIELD_SOURCES:
+            raise ValueError(f"model.field_source must be one of {VALID_FIELD_SOURCES}, got {m.field_source!r}")
+        if m.field_segments < 1:
+            raise ValueError("model.field_segments must be >= 1")
+        if not m.field_pool_modes:
+            raise ValueError("model.field_pool_modes must be non-empty")
+        bad_modes = [mo for mo in m.field_pool_modes if mo not in VALID_FIELD_POOL_MODES]
+        if bad_modes:
+            raise ValueError(f"model.field_pool_modes has invalid modes {bad_modes}; must be one of {VALID_FIELD_POOL_MODES}")
+        if not 0 <= m.field_dropout_p < 1:
+            raise ValueError("model.field_dropout_p must be in [0, 1)")
+        if m.field_alpha < 0:
+            raise ValueError("model.field_alpha must be >= 0")
+        if m.field_ce_weight < 0:
+            raise ValueError("model.field_ce_weight must be >= 0")
+        if m.field_lr < 0:
+            raise ValueError("model.field_lr must be >= 0")
 
         self.check_split(d.train, "data.train")
         if d.val is not None:
@@ -151,6 +199,11 @@ class Config:
             raise ValueError(f"train.end_lr ({t.end_lr}) must be in (0, train.lr={t.lr})")
         if not 1 <= t.average_from <= t.epochs:
             raise ValueError(f"train.average_from ({t.average_from}) must be in [1, train.epochs={t.epochs}]")
+        if t.average_to is not None and not t.average_from <= t.average_to <= t.epochs:
+            raise ValueError(
+                f"train.average_to ({t.average_to}) must be in [train.average_from={t.average_from}, "
+                f"train.epochs={t.epochs}]"
+            )
         if t.eval_every < 0:
             raise ValueError("train.eval_every must be >= 0")
         if t.eval_every and d.val is None:
