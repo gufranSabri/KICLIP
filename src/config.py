@@ -13,9 +13,9 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 VALID_ARCHS = ("ViT-B-32", "ViT-B-16", "ViT-L-14")
 VALID_TEMPORAL = ("expand",)
 VALID_INJECT_SOURCES = ("teacher", "blocks")
-VALID_FIELD_SOURCES = ("student", "teacher", "both")
-VALID_FIELD_POOL_MODES = ("mean", "max", "dropout")
-VALID_FIELD_TARGETS = ("label", "teacher", "both")
+VALID_CGAS_SOURCES = ("student", "teacher", "both")
+VALID_CGAS_POOL_MODES = ("mean", "max", "min", "dropout")
+VALID_CGAS_TARGETS = ("label", "teacher", "both")
 CROSS_TEST = (
     "cross/ucf101/full", "cross/ucf101/split1", "cross/ucf101/split2", "cross/ucf101/split3",
     "cross/hmdb51/full", "cross/hmdb51/split1", "cross/hmdb51/split2", "cross/hmdb51/split3",
@@ -33,16 +33,20 @@ class ModelConfig:
     residual_alpha: float = 0.1
     aux_classifier: bool = True
     grad_checkpointing: bool = False
-    field_enabled: bool = False
-    field_source: str = "student"
-    field_segments: int = 64
-    field_pool_modes: list[str] = field(default_factory=lambda: ["mean", "max", "dropout"])
-    field_dropout_p: float = 0.3
-    field_alpha: float = 0.1
-    field_ce_weight: float = 1.0
-    field_lr: float = 3.33e-5
-    field_target: str = "label"
-    field_tau: float = 1.0
+    cgas_enabled: bool = False
+    cgas_source: str = "student"
+    cgas_segments: int = 64
+    cgas_pool_modes: list[str] = field(default_factory=lambda: ["mean", "max", "dropout"])
+    cgas_dropout_p: float = 0.3
+    cgas_ce_weight: float = 1.0
+    cgas_lr: float = 3.33e-5
+    cgas_target: str = "label"
+    cgas_tau: float = 1.0
+    cgas_layers: str = "all"  # "all" | "last_K" | comma list of 1-indexed block numbers, e.g. "10,11,12"
+    cgas_detach: bool = False  # cgas_ce still trains the head but sends zero gradient into the backbone
+    cgas_clip_separate: bool = False  # clip backbone and head gradients independently, not one global clip
+    cgas_grad_log: bool = False  # log per-step backbone/head grad norms and GradScaler skips to history.json
+    vision_dropout: float = 0.0  # plain dropout on the final pooled embedding; no CGAS machinery, no extra loss
 
 
 @dataclass
@@ -129,27 +133,29 @@ class Config:
             raise ValueError("model.distill_weight must be >= 0")
         if m.residual_alpha < 0:
             raise ValueError("model.residual_alpha must be >= 0")
-        if m.field_source not in VALID_FIELD_SOURCES:
-            raise ValueError(f"model.field_source must be one of {VALID_FIELD_SOURCES}, got {m.field_source!r}")
-        if m.field_segments < 1:
-            raise ValueError("model.field_segments must be >= 1")
-        if not m.field_pool_modes:
-            raise ValueError("model.field_pool_modes must be non-empty")
-        bad_modes = [mo for mo in m.field_pool_modes if mo not in VALID_FIELD_POOL_MODES]
+        if m.cgas_source not in VALID_CGAS_SOURCES:
+            raise ValueError(f"model.cgas_source must be one of {VALID_CGAS_SOURCES}, got {m.cgas_source!r}")
+        if m.cgas_segments < 1:
+            raise ValueError("model.cgas_segments must be >= 1")
+        if not m.cgas_pool_modes:
+            raise ValueError("model.cgas_pool_modes must be non-empty")
+        bad_modes = [mo for mo in m.cgas_pool_modes if mo not in VALID_CGAS_POOL_MODES]
         if bad_modes:
-            raise ValueError(f"model.field_pool_modes has invalid modes {bad_modes}; must be one of {VALID_FIELD_POOL_MODES}")
-        if not 0 <= m.field_dropout_p < 1:
-            raise ValueError("model.field_dropout_p must be in [0, 1)")
-        if m.field_alpha < 0:
-            raise ValueError("model.field_alpha must be >= 0")
-        if m.field_ce_weight < 0:
-            raise ValueError("model.field_ce_weight must be >= 0")
-        if m.field_lr < 0:
-            raise ValueError("model.field_lr must be >= 0")
-        if m.field_target not in VALID_FIELD_TARGETS:
-            raise ValueError(f"model.field_target must be one of {VALID_FIELD_TARGETS}, got {m.field_target!r}")
-        if m.field_tau <= 0:
-            raise ValueError("model.field_tau must be > 0")
+            raise ValueError(f"model.cgas_pool_modes has invalid modes {bad_modes}; must be one of {VALID_CGAS_POOL_MODES}")
+        if not 0 <= m.cgas_dropout_p < 1:
+            raise ValueError("model.cgas_dropout_p must be in [0, 1)")
+        if m.cgas_ce_weight < 0:
+            raise ValueError("model.cgas_ce_weight must be >= 0")
+        if m.cgas_lr < 0:
+            raise ValueError("model.cgas_lr must be >= 0")
+        if m.cgas_target not in VALID_CGAS_TARGETS:
+            raise ValueError(f"model.cgas_target must be one of {VALID_CGAS_TARGETS}, got {m.cgas_target!r}")
+        if m.cgas_tau <= 0:
+            raise ValueError("model.cgas_tau must be > 0")
+        if m.cgas_layers != "all" and not m.cgas_layers.startswith("last_") and not m.cgas_layers.replace(",", "").isdigit():
+            raise ValueError(f"model.cgas_layers must be 'all', 'last_K', or a comma list of block numbers, got {m.cgas_layers!r}")
+        if not 0 <= m.vision_dropout < 1:
+            raise ValueError("model.vision_dropout must be in [0, 1)")
 
         self.check_split(d.train, "data.train")
         if d.val is not None:

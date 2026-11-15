@@ -62,13 +62,25 @@ def _accumulate(average: dict | None, model: torch.nn.Module, n: int) -> dict:
     return average
 
 
+def _grad_groups(model: torch.nn.Module) -> tuple[list, list]:
+    # the CGAS head's params vs. everything else trainable, for cgas_clip_separate / cgas_grad_log
+    cgas, backbone = [], []
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            (cgas if "cgas_head." in name else backbone).append(p)
+    return backbone, cgas
+
+
 def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: int,
-                device: torch.device, main: bool, field_lr_scale: float = 0.0) -> dict:
+                device: torch.device, main: bool, cgas_lr_scale: float = 0.0) -> dict:
     # no gradient accumulation, as in reference/KICLIP: every batch is one optimizer step
     model.train()
     amp = cfg.train.amp and device.type == "cuda"
     steps = len(loader)
-    sums = torch.zeros(7, device=device)  # loss, ce, kd, aux, field_ce, correct, videos
+    sums = torch.zeros(7, device=device)  # loss, ce, kd, aux, cgas_ce, correct, videos
+    log_grad = cfg.model.cgas_grad_log
+    backbone_params, cgas_params = _grad_groups(model) if (log_grad or cfg.model.cgas_clip_separate) else ([], [])
+    grad_log: list[dict] = []
 
     for step, (video, labels) in enumerate(
         progress(loader, desc=f"epoch {epoch + 1}", leave=False, ncols=100, disable=not main, total=steps)
@@ -81,30 +93,62 @@ def train_epoch(model, loader, tokens, optimizer, scaler, cfg: Config, epoch: in
         # one random template plus the bare description, redrawn every forward
         prompt = tokens[[random.randrange(len(TEMPLATES)), len(TEMPLATES)]]
         with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-            logits, kd, aux, field_ce = model(video, prompt, labels)
+            logits, kd, aux, cgas_ce = model(video, prompt, labels)
             ce = F.cross_entropy(logits, labels)
-            loss = ce + cfg.model.distill_weight * kd + aux + cfg.model.field_ce_weight * field_ce
+            loss = ce + cfg.model.distill_weight * kd + aux + cfg.model.cgas_ce_weight * cgas_ce
         scaler.scale(loss).backward()
         sums += torch.stack([
-            loss.detach(), ce.detach(), kd.detach(), aux.detach(), field_ce.detach(),
+            loss.detach(), ce.detach(), kd.detach(), aux.detach(), cgas_ce.detach(),
             (logits.argmax(-1) == labels).sum().float(), torch.tensor(float(len(labels)), device=device),
         ])
 
         if not torch.isfinite(loss):
             raise RuntimeError(f"non-finite loss at epoch {epoch + 1}, step {step}; lower train.lr or disable train.amp")
         scaler.unscale_(optimizer)
-        if cfg.train.grad_clip > 0:
+        backbone_norm = cgas_norm = None
+        if log_grad:
+            # PRE-clip, so this answers docs/cgas.md directly: does the head's gradient push the shared clip
+            # factor below 1 on steps where the backbone alone would not have been clipped?
+            backbone_norm, cgas_norm = _grad_norm(backbone_params), _grad_norm(cgas_params)
+        if cfg.model.cgas_clip_separate:
+            # backbone and head each clipped to train.grad_clip independently, so neither group's norm can
+            # shrink the other's effective step size -- tests whether a SHARED clip is the channel
+            torch.nn.utils.clip_grad_norm_(backbone_params, cfg.train.grad_clip or float("inf"))
+            torch.nn.utils.clip_grad_norm_(cgas_params, cfg.train.grad_clip or float("inf"))
+        elif cfg.train.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+        if log_grad:
+            scale_before = scaler.get_scale()
         scaler.step(optimizer)
         scaler.update()
+        if log_grad:
+            grad_log.append({
+                "backbone_grad_norm": float(backbone_norm) if backbone_norm is not None else None,
+                "cgas_grad_norm": float(cgas_norm) if cgas_norm is not None else None,
+                "scaler_skipped": scaler.get_scale() < scale_before,
+            })
 
-    loss, ce, kd, aux, field_ce, correct, videos = dist.all_sum(sums.tolist(), device)
+    loss, ce, kd, aux, cgas_ce, correct, videos = dist.all_sum(sums.tolist(), device)
     total_steps = steps * dist.rank_world()[1]
-    return {
+    record = {
         "loss": loss / total_steps, "ce": ce / total_steps, "kd": kd / total_steps, "aux": aux / total_steps,
-        "field_ce": field_ce / total_steps,
-        "top1": 100 * correct / max(videos, 1), "lr": lr, "field_lr": lr * field_lr_scale,
+        "cgas_ce": cgas_ce / total_steps,
+        "top1": 100 * correct / max(videos, 1), "lr": lr, "cgas_lr": lr * cgas_lr_scale,
     }
+    if log_grad:
+        skipped = sum(g["scaler_skipped"] for g in grad_log)
+        record["grad_log"] = {
+            "backbone_grad_norm_mean": sum(g["backbone_grad_norm"] for g in grad_log) / len(grad_log),
+            "cgas_grad_norm_mean": sum(g["cgas_grad_norm"] for g in grad_log) / len(grad_log),
+            "scaler_skips": skipped, "steps": len(grad_log), "scaler_skip_rate": skipped / len(grad_log),
+        }
+    return record
+
+
+def _grad_norm(params: list) -> float:
+    # read-only L2 norm across a param group's .grad, taken after scaler.unscale_ but BEFORE any clipping
+    sq = sum(p.grad.detach().float().pow(2).sum() for p in params if p.grad is not None)
+    return float(sq ** 0.5)
 
 
 def _section(title: str) -> None:
@@ -137,12 +181,15 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
                 if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") else "off")
     logger.info("aux classif. : %s", "a fresh MLP on the pooled video embedding, trained with CE"
                 if m.aux_classifier else "off")
-    logger.info("field        : %s", (
-        f"source {m.field_source} | segments {m.field_segments} | pool_modes {m.field_pool_modes} | "
-        f"dropout_p {m.field_dropout_p:g} | field_alpha {m.field_alpha:g} (on the final pooled embedding) | "
-        f"field_lr {m.field_lr:.3g} | field_ce_weight {m.field_ce_weight:g} | target {m.field_target} "
-        f"(tau {m.field_tau:g})"
-    ) if m.field_enabled else "off")
+    logger.info("cgas         : %s", (
+        f"source {m.cgas_source} | layers {m.cgas_layers} | segments {m.cgas_segments} | "
+        f"pool_modes {m.cgas_pool_modes} | dropout_p {m.cgas_dropout_p:g} | "
+        f"cgas_lr {m.cgas_lr:.3g} | cgas_ce_weight {m.cgas_ce_weight:g} | target {m.cgas_target} "
+        f"(tau {m.cgas_tau:g}) | detach {m.cgas_detach} | separate clip {m.cgas_clip_separate} | "
+        f"grad log {m.cgas_grad_log}"
+    ) if m.cgas_enabled else "off")
+    logger.info("vision dropout: %s", f"p={m.vision_dropout:g} on the final pooled embedding"
+                if m.vision_dropout > 0 else "off")
 
     _section("optimisation")
     logger.info("batch        : %d = %d per GPU x %d GPU(s), no accumulation", t.batch_size, per_gpu_batch, world)
@@ -160,7 +207,7 @@ def log_param_counts(model: KICLIP) -> None:
         ("text encoder", [clip.transformer, clip.token_embedding, clip.ln_final]),
         ("projectors", [p for p in (model.projector_v, model.projector_t) if p is not None]),
         ("aux classifier", [model.aux] if model.aux is not None else []),
-        ("field embedder", [model.field_embed] if model.field_embed is not None else []),
+        ("cgas head", [model.cgas_head] if model.cgas_head is not None else []),
     ]
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     for name, mods in groups:
@@ -220,10 +267,10 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         model = DistributedDataParallel(student, device_ids=[device.index] if device.type == "cuda" else None)
     else:
         model = student
-    field_lr_scale = cfg.model.field_lr / t.lr if cfg.model.field_enabled else 0.0
+    cgas_lr_scale = cfg.model.cgas_lr / t.lr if cfg.model.cgas_enabled else 0.0
     lr_scales = []
-    if cfg.model.field_enabled:
-        lr_scales.append(("field_embed.", field_lr_scale))
+    if cfg.model.cgas_enabled:
+        lr_scales.append(("cgas_head.", cgas_lr_scale))
     optimizer = torch.optim.AdamW(
         param_groups(student, t.weight_decay, lr_scales), lr=t.lr, betas=(0.9, 0.999), eps=1e-8
     )
@@ -254,7 +301,7 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
             sampler.set_epoch(epoch)
         t0 = time.time()
         record = {"epoch": epoch + 1, **train_epoch(
-            model, loader, tokens, optimizer, scaler, cfg, epoch, device, main, field_lr_scale
+            model, loader, tokens, optimizer, scaler, cfg, epoch, device, main, cgas_lr_scale
         )}
         if main and t.average_from <= epoch + 1 <= (t.average_to or t.epochs):
             averaged += 1
@@ -265,13 +312,20 @@ def train(cfg: Config, run_name: str | None = None) -> dict:
         history.append(record)
 
         val = f" | val {format_metrics(record['val'])}" if "val" in record else ""
-        field_lr = f" (field {record['field_lr']:.2e})" if cfg.model.field_enabled else ""
+        cgas_lr = f" (cgas {record['cgas_lr']:.2e})" if cfg.model.cgas_enabled else ""
         logger.info(
-            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, field %.4f) | train top1 %.2f%s | "
+            "epoch %2d | loss %.4f (ce %.4f, kd %.4f, aux %.4f, cgas %.4f) | train top1 %.2f%s | "
             "lr %.2e%s | %.0fs",
             epoch + 1, record["loss"], record["ce"], record["kd"], record["aux"],
-            record["field_ce"], record["top1"], val, record["lr"], field_lr, record["seconds"],
+            record["cgas_ce"], record["top1"], val, record["lr"], cgas_lr, record["seconds"],
         )
+        if "grad_log" in record:
+            g = record["grad_log"]
+            logger.info(
+                "           | grad norm: backbone %.4f, cgas %.4f | scaler skipped %d/%d steps (%.1f%%)",
+                g["backbone_grad_norm_mean"], g["cgas_grad_norm_mean"], g["scaler_skips"],
+                g["steps"], 100 * g["scaler_skip_rate"],
+            )
         if main:
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
             torch.save({

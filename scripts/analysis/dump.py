@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Dumps what report.py analyses: per-frame embeddings and field inputs, per-block CLS / patch-mean / frozen-stream
+# Dumps what report.py analyses: per-frame embeddings and CGAS inputs, per-block CLS / patch-mean / frozen-stream
 # tokens and class text features, for zero-shot CLIP and every run, over data.train + data.test. One decode per batch.
 #
 #     python scripts/analysis/dump.py --config configs/b2n/hmdb51.yaml \
-#         --runs runs/froster runs/ki runs/field_pool_dropout
+#         --runs runs/froster runs/ki runs/cgas
 
 from __future__ import annotations
 
@@ -21,13 +21,13 @@ from torch.utils.data import DataLoader  # noqa: E402
 
 from src.config import Config, ModelConfig, load_config, parse_overrides  # noqa: E402
 from src.models.clip import CLIP, pretrained_state  # noqa: E402
-from src.models.field import pool_segments  # noqa: E402
+from src.models.cgas import pool_segments  # noqa: E402
 from src.models.kiclip import KICLIP, build_kiclip, class_features  # noqa: E402
 from src.utils.progress import progress  # noqa: E402
 from src.utils.seed import pick_device, seed_everything  # noqa: E402
 
 CLIP_NAME = "clip"
-RUNS = ("runs/froster", "runs/ki", "runs/field_pool_dropout")
+RUNS = ("runs/froster", "runs/ki", "runs/cgas")
 
 
 class Recorder:
@@ -86,7 +86,7 @@ def load_entry(spec: str, cfg: Config, device: torch.device, segments: int) -> E
     weights = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
     model = build_kiclip(replace(cfg, model=model_cfg), weights)
     model.load_state_dict(state, strict=False)
-    own = model_cfg.field_segments if model.field_embed is not None else segments
+    own = model_cfg.cgas_segments if model.cgas_head is not None else segments
     name = path.parent.name
     return Entry(name, str(path), model.to(device).eval(), Recorder(model), own, ckpt_cfg)
 
@@ -97,7 +97,7 @@ def record(entry: Entry, video: torch.Tensor, amp: bool) -> dict[str, torch.Tens
     b, v, t = video.shape[:3]
     rec, visual = entry.recorder, entry.model.model.visual
     with torch.autocast(video.device.type, dtype=torch.float16, enabled=amp):
-        _, _, _, _, field_raw = entry.model.encode_video(video)
+        _, _, _, _, cgas_raw = entry.model.encode_video(video)
         head = rec.head @ visual.proj
     cls = torch.stack(rec.cls, 1)                                              # (N, L, W)
     out = {
@@ -108,8 +108,8 @@ def record(entry: Entry, video: torch.Tensor, amp: bool) -> dict[str, torch.Tens
     }
     if rec.stream:
         out["stream"] = torch.stack(rec.stream, 1).view(b, v * t, *cls.shape[1:]).mean(1).cpu()
-    if field_raw is not None:
-        out["field"] = field_raw.float().view(b, v, t, -1).half().cpu()
+    if cgas_raw is not None:
+        out["cgas"] = cgas_raw.float().view(b, v, t, -1).half().cpu()
     rec.clear()
     return out
 
@@ -142,19 +142,18 @@ def header(entry: Entry) -> dict:
         "checkpoint": entry.checkpoint,
         "config": entry.config,
         "logit_scale": m.model.logit_scale.exp().item(),
-        "field_alpha": m.field_alpha if m.field_embed is not None else 0.0,
         "segments": entry.segments,
-        "field_embed": {k: v.float().cpu() for k, v in m.field_embed.state_dict().items()} if m.field_embed is not None else None,
+        "cgas_head": {k: v.float().cpu() for k, v in m.cgas_head.state_dict().items()} if m.cgas_head is not None else None,
         "splits": {},
     }
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="dump embeddings, field inputs and block tokens for report.py")
+    ap = argparse.ArgumentParser(description="dump embeddings, CGAS inputs and block tokens for report.py")
     ap.add_argument("--runs", nargs="+", default=list(RUNS), help="run dirs or averaged.pt files")
     ap.add_argument("--no-clip", action="store_true", help="skip the zero-shot CLIP reference")
     ap.add_argument("--splits", nargs="+", default=None, help="default: data.train + data.test")
-    ap.add_argument("--segments", type=int, default=64, help="field pooling for runs without a field")
+    ap.add_argument("--segments", type=int, default=64, help="pooling width for runs without a CGAS head")
     ap.add_argument("--config", action="append", default=[], help="dataset config (default configs/b2n/hmdb51.yaml)")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VAL", help="override a config key")
     ap.add_argument("--out", default="runs/analysis/dumps")
@@ -173,7 +172,7 @@ def main() -> None:
     if len(set(names)) != len(names):
         raise SystemExit(f"run names collide: {names}; dump them in separate calls with different --out")
     for e in entries:
-        print(f"  {e.name:28s} {e.checkpoint} | field {'on' if e.model.field_embed is not None else 'off'} "
+        print(f"  {e.name:28s} {e.checkpoint} | cgas {'on' if e.model.cgas_head is not None else 'off'} "
               f"| KI blocks {'on' if e.model.model.visual.transformer.resblocks_f is not None else 'off'}")
 
     out = Path(args.out)

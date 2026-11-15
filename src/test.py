@@ -59,35 +59,35 @@ def evaluate(model: KICLIP, dataset: VideoDataset, tokens: torch.Tensor, cfg: Co
     )
     k = min(5, classes.shape[0])
     correct1 = correctk = n = 0
-    field_on = model.field_source is not None
-    field_correct1 = field_correctk = 0
+    cgas_on = model.cgas_source is not None
+    cgas_correct1 = cgas_correctk = 0
     for video, labels in progress(loader, desc=desc, leave=False, ncols=100, disable=rank != 0):
         video, labels = video.to(device, non_blocking=True), labels.to(device)
         b, v = video.shape[:2]
         with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
-            frames, _, _, _, field_raw = model.encode_video(video)  # frames already carries the field correction
+            frames, _, _, _, cgas_raw = model.encode_video(video)
             logits = clip_logits(model.model, frames, classes, model.num_frames).view(b, v, -1).sum(1)
         top = logits.topk(k, dim=-1).indices
         correct1 += (top[:, 0] == labels).sum().item()
         correctk += (top == labels[:, None]).any(-1).sum().item()
         n += b
-        if field_on:
-            # the field's OWN classifier, standalone (not mixed with the main head); open-vocabulary (same
+        if cgas_on:
+            # the CGAS head's OWN classifier, standalone (not mixed with the main head); open-vocabulary (same
             # embed_dim as the main head), so this works on any split's class count, including novel.
-            # F.normalize runs in fp32 under autocast regardless of field_raw's dtype; match classes' dtype
+            # F.normalize runs in fp32 under autocast regardless of cgas_raw's dtype; match classes' dtype
             # before the matmul in clip_logits, which autocast does NOT upcast for us here
-            field_normed = F.normalize(field_raw, dim=-1).to(classes.dtype)
-            field_logits = clip_logits(model.model, field_normed, classes, model.num_frames).view(b, v, -1).sum(1)
-            field_top = field_logits.topk(k, dim=-1).indices
-            field_correct1 += (field_top[:, 0] == labels).sum().item()
-            field_correctk += (field_top == labels[:, None]).any(-1).sum().item()
+            cgas_normed = F.normalize(cgas_raw, dim=-1).to(classes.dtype)
+            cgas_logits = clip_logits(model.model, cgas_normed, classes, model.num_frames).view(b, v, -1).sum(1)
+            cgas_top = cgas_logits.topk(k, dim=-1).indices
+            cgas_correct1 += (cgas_top[:, 0] == labels).sum().item()
+            cgas_correctk += (cgas_top == labels[:, None]).any(-1).sum().item()
 
     correct1, correctk, n = dist.all_sum([correct1, correctk, n], device)
     metrics = {"top1": 100 * correct1 / n, "top5": 100 * correctk / n, "n": int(n)}
-    if field_on:
-        field_correct1, field_correctk = dist.all_sum([field_correct1, field_correctk], device)
-        metrics["field_top1"] = 100 * field_correct1 / n
-        metrics["field_top5"] = 100 * field_correctk / n
+    if cgas_on:
+        cgas_correct1, cgas_correctk = dist.all_sum([cgas_correct1, cgas_correctk], device)
+        metrics["cgas_top1"] = 100 * cgas_correct1 / n
+        metrics["cgas_top5"] = 100 * cgas_correctk / n
     model.train(was_training)
     return metrics
 
@@ -148,7 +148,7 @@ def test(cfg: Config, checkpoint: str | Path, splits: list[str] | None = None) -
             if has_injection(weights) else f"{path} lacks the frozen injection blocks model.inject_source=blocks needs"
         )
     model = build_kiclip(cfg, weights).to(device)
-    # build_kiclip only loads the inner CLIP submodule from `weights`; load the rest of the checkpoint (field_embed,
+    # build_kiclip only loads the inner CLIP submodule from `weights`; load the rest of the checkpoint (cgas_head,
     # aux, projector_v/t) on top -- strict=False since a fresh model may have modules this checkpoint predates
     model.load_state_dict(state, strict=False)
 

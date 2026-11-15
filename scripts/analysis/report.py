@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# CPU report over dump.py's outputs: accuracy decompositions, field strength / geometry / layer attribution, base pull
-# in the joint label space, layer-wise separability and drift, text drift, calibration, per-class results, curves.
+# CPU report over dump.py's outputs: accuracy decomposition, CGAS head geometry / layer attribution, base pull in
+# the joint label space, layer-wise separability and drift, text drift, calibration, per-class results, curves.
 #
 #     OMP_NUM_THREADS=1 python scripts/analysis/report.py --dumps runs/analysis/dumps \
-#         --runs froster ki field_pool_dropout --out docs/analysis
+#         --runs froster ki cgas --out docs/analysis
 
 from __future__ import annotations
 
@@ -23,12 +23,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
+from src.models.kiclip import parse_cgas_layers  # noqa: E402
+
 CLIP_NAME = "clip"
 SURFACE, INK, INK2, MUTED, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300")
 SPLIT_COLORS = {"base": "#4a3aa7", "novel": "#e34948"}
 SPLIT_STYLES = {"base": "-", "novel": "--"}
-ALPHAS = [i / 10 for i in range(21)]
 LAMBDAS = [i / 10 for i in range(11)]
 FOLDS = 5
 
@@ -65,7 +66,7 @@ def video_mean(emb: torch.Tensor) -> torch.Tensor:  # (n, V, T, D) -> (n, D) mea
     return F.normalize(F.normalize(emb.float(), dim=-1).mean((1, 2)), dim=-1)
 
 
-def field_apply(state: dict[str, torch.Tensor], pooled: torch.Tensor) -> torch.Tensor:  # (..., L, M) -> (..., D)
+def cgas_apply(state: dict[str, torch.Tensor], pooled: torch.Tensor) -> torch.Tensor:  # (..., L, M) -> (..., D)
     x = F.gelu(F.linear(pooled.float().flatten(-2), state["net.1.weight"], state["net.1.bias"]))
     return F.linear(x, state["net.3.weight"], state["net.3.bias"])
 
@@ -146,20 +147,35 @@ class Run:
     def __init__(self, path: Path):
         d = torch.load(path, map_location="cpu", mmap=True, weights_only=True)
         self.name, self.checkpoint, self.config = d["name"], d["checkpoint"], d["config"]
-        self.scale, self.alpha, self.segments = d["logit_scale"], d["field_alpha"], d["segments"]
-        self.field_embed = d["field_embed"]
+        self.scale, self.segments = d["logit_scale"], d["segments"]
+        self.cgas_head = d["cgas_head"]
         self.splits = d["splits"]
         self.is_clip = self.checkpoint == CLIP_NAME
         self.color = MUTED
         self._cache: dict = {}
 
     @property
-    def has_field(self) -> bool:
-        return self.field_embed is not None
+    def has_cgas(self) -> bool:
+        return self.cgas_head is not None
+
+    @property
+    def cgas_block_idx(self) -> list[int] | None:
+        # dump.py always pools ALL 12 blocks into "pooled"; a run whose model.cgas_layers is a subset (e.g.
+        # last_1) needs pooled sliced down to the SAME blocks its cgas_head was actually trained on, or
+        # cgas_apply's matmul shape is wrong (or, worse, silently reads the wrong blocks) -- see cgas_layers()
+        if not self.has_cgas:
+            return None
+        spec = (self.config or {}).get("model", {}).get("cgas_layers", "all")
+        return parse_cgas_layers(spec, 12)
+
+    def pooled(self, split: str) -> torch.Tensor:  # (..., 12, M) -> (..., len(cgas_block_idx), M)
+        full = self.splits[split]["pooled"].float()
+        idx = self.cgas_block_idx
+        return full if idx is None or len(idx) == 12 else full[..., idx, :]
 
     @property
     def variants(self) -> list[str]:
-        return ["final", "backbone", "field"] if self.has_field else ["final"]
+        return ["final", "cgas"] if self.has_cgas else ["final"]
 
     def run_dir(self) -> Path | None:
         if self.is_clip:
@@ -173,13 +189,11 @@ class Run:
     def classes(self, split: str) -> torch.Tensor:
         return self.splits[split]["classes"].float()
 
-    def emb(self, split: str, variant: str = "final", alpha: float | None = None) -> torch.Tensor:
+    def emb(self, split: str, variant: str = "final") -> torch.Tensor:
         s = self.splits[split]
-        if variant == "field":
-            return s["field"].float()
-        if variant == "backbone" or not self.has_field:
-            return s["head"].float()
-        return s["head"].float() + (self.alpha if alpha is None else alpha) * s["field"].float()
+        if variant == "cgas":
+            return s["cgas"].float()
+        return s["head"].float()
 
     def logits(self, split: str, variant: str = "final") -> torch.Tensor:  # (n, V, C), cached
         key = (split, variant)
@@ -228,7 +242,7 @@ def legend_runs(ax, runs: list[Run], styles: bool = False) -> None:
 
 def sanity(rep: Report, runs: list[Run], sp: dict) -> None:
     rep.section("0. Sanity", "Top-1 recomputed from the dumped fp16 embeddings against each run's results.json; "
-                "for field runs, cosine between the dumped field and field_embed re-applied to the dumped pooled input.")
+                "for CGAS runs, cosine between the dumped head output and cgas_head re-applied to the dumped pooled input.")
     rows = []
     for r in runs:
         for key in ("base", "novel"):
@@ -239,16 +253,16 @@ def sanity(rep: Report, runs: list[Run], sp: dict) -> None:
                 if path.exists():
                     ref = json.loads(path.read_text()).get(key, {}).get("top1", "-")
             recompute = "-"
-            if r.has_field:
-                s = r.splits[sp[key]]
-                recompute = F.cosine_similarity(field_apply(r.field_embed, s["pooled"]), s["field"].float(), dim=-1).mean().item()
+            if r.has_cgas:
+                cgas_out = cgas_apply(r.cgas_head, r.pooled(sp[key]))
+                recompute = F.cosine_similarity(cgas_out, r.splits[sp[key]]["cgas"].float(), dim=-1).mean().item()
             rows.append([r.name, key, ours, ref, recompute])
-    rep.table(["run", "split", "top1 (dump)", "top1 (results.json)", "field recompute cos"], rows)
+    rep.table(["run", "split", "top1 (dump)", "top1 (results.json)", "cgas recompute cos"], rows)
 
 
 def accuracy(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("1. Accuracy decomposition", "`final` is what test.py scores; `backbone` drops the field (frames only); "
-                "`field` is the field classifier alone. Train is the 16-shot training split under the eval protocol.")
+    rep.section("1. Accuracy decomposition", "`final` is what test.py scores; `cgas` is the CGAS head's own "
+                "open-vocabulary classifier alone. Train is the 16-shot training split under the eval protocol.")
     rows, out = [], {}
     for r in runs:
         for v in r.variants:
@@ -279,42 +293,10 @@ def tower_swap(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None
     rep.metrics["tower_swap"] = out
 
 
-def alpha_sweep(rep: Report, runs: list[Run], sp: dict) -> None:
-    field_runs = [r for r in runs if r.has_field]
-    if not field_runs:
-        return
-    rep.section("3. Field strength at test time", "frames = f + α·g with α swept at test time only (trained α marked).")
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3.2))
-    rows, out = [], {}
-    for r in field_runs:
-        curve = {"base": [], "novel": []}
-        for a in ALPHAS:
-            for key in curve:
-                s = sp[key]
-                curve[key].append(top1(view_logits(r.emb(s, alpha=a), r.classes(s), r.scale), r.y(s)))
-        curve["hm"] = [hm(b, n) for b, n in zip(curve["base"], curve["novel"])]
-        out[r.name] = {"alpha": ALPHAS, **curve}
-        for ax, key in zip(axes, ("base", "novel", "hm")):
-            ax.plot(ALPHAS, curve[key], color=r.color, marker="o")
-            ax.axvline(r.alpha, color=MUTED, ls=":", lw=1)
-        best = max(range(len(ALPHAS)), key=lambda i: curve["hm"][i])
-        best_novel = max(range(len(ALPHAS)), key=lambda i: curve["novel"][i])
-        trained = hm(*(top1(r.logits(sp[k]), r.y(sp[k])) for k in ("base", "novel")))
-        rows.append([r.name, r.alpha, curve["base"][0], curve["novel"][0], curve["hm"][0], trained,
-                     f"{curve['hm'][best]:.2f} @ {ALPHAS[best]:g}", f"{curve['novel'][best_novel]:.2f} @ {ALPHAS[best_novel]:g}"])
-    for ax, title in zip(axes, ("base top1", "novel top1", "HM")):
-        ax.set_title(title)
-        ax.set_xlabel("α at test")
-    legend_runs(axes[0], field_runs)
-    rep.figure(fig, "alpha_sweep", "field strength sweep")
-    rep.table(["run", "trained α", "base @0", "novel @0", "HM @0", "HM @trained", "best HM", "best novel"], rows)
-    rep.metrics["alpha_sweep"] = out
-
-
 def zeroshot_ensemble(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
     if clip is None:
         return
-    rep.section("4. Output ensemble with zero-shot CLIP",
+    rep.section("3. Output ensemble with zero-shot CLIP",
                 "(1-λ)·logits(run) + λ·logits(CLIP), each in its own text space: how much novel the pretrained model "
                 "still adds on top.")
     fig, axes = plt.subplots(1, 3, figsize=(11, 3.2))
@@ -342,7 +324,7 @@ def zeroshot_ensemble(rep: Report, runs: list[Run], clip: Run | None, sp: dict) 
 
 
 def base_pull(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("5. Base pull in the joint label space",
+    rep.section("4. Base pull in the joint label space",
                 "Every video scored against base ∪ novel class texts (26 + 25). `→ other` is the share of a split's "
                 "videos whose top-1 lands in the OTHER split's classes; joint HM is the generalized-ZSL HM.")
     rows, out, bars = [], {}, []
@@ -374,48 +356,10 @@ def base_pull(rep: Report, runs: list[Run], sp: dict) -> None:
     rep.metrics["base_pull"] = out
 
 
-def field_geometry(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
-    rep.section("6. Field geometry and its effect on the logits",
-                "ratio = α‖g‖/‖f‖ per frame; cos(g, f); margin gain = Δ(true logit − mean other logit) from adding "
-                "the field (per video, summed views); flips = backbone → final correctness changes.")
-    rows, out = [], {}
-    field_runs = [r for r in runs if r.has_field]
-    for r in field_runs:
-        fig, axes = plt.subplots(1, 2, figsize=(9, 3))
-        for key in [k for k in ("train", "base", "novel") if k in sp]:
-            s, y = r.splits[sp[key]], r.y(sp[key])
-            f, g = s["head"].float(), s["field"].float()
-            ratio = (r.alpha * g.norm(dim=-1) / f.norm(dim=-1)).flatten()
-            cos = F.cosine_similarity(g, f, dim=-1).flatten()
-            d = (r.logits(sp[key], "final") - r.logits(sp[key], "backbone")).sum(1)
-            true = d.gather(1, y[:, None]).squeeze(1)
-            gain = (true - (d.sum(1) - true) / (d.shape[1] - 1)).mean().item()
-            before = r.logits(sp[key], "backbone").sum(1).argmax(-1) == y
-            after = r.logits(sp[key], "final").sum(1).argmax(-1) == y
-            m = {"ratio_mean": ratio.mean().item(), "ratio_median": ratio.median().item(), "cos_gf": cos.mean().item(),
-                 "margin_gain": gain, "dlogit_std": d.std(1).mean().item(),
-                 "fixed": int((~before & after).sum()), "broken": int((before & ~after).sum()), "n": len(y)}
-            out.setdefault(r.name, {})[key] = m
-            rows.append([r.name, key, m["ratio_mean"], m["ratio_median"], m["cos_gf"], m["margin_gain"], m["dlogit_std"],
-                         m["fixed"], m["broken"], m["n"]])
-            if key in SPLIT_COLORS:
-                axes[0].hist(ratio.numpy(), bins=60, histtype="step", lw=1.6, color=SPLIT_COLORS[key], ls=SPLIT_STYLES[key],
-                             density=True, label=key)
-                axes[1].hist(cos.numpy(), bins=60, histtype="step", lw=1.6, color=SPLIT_COLORS[key], ls=SPLIT_STYLES[key],
-                             density=True, label=key)
-        axes[0].set_xlabel("α‖g‖ / ‖f‖ per frame")
-        axes[1].set_xlabel("cos(g, f) per frame")
-        for ax in axes:
-            ax.set_ylabel("density")
-            ax.legend()
-        fig.suptitle(r.name, fontsize=10, color=INK)
-        rep.figure(fig, f"field_geometry_{r.name}", f"field geometry {r.name}")
-    if rows:
-        rep.table(["run", "split", "ratio mean", "ratio median", "cos(g,f)", "margin gain", "Δlogit std", "fixed", "broken", "n"], rows)
-
-    rep.text("**Text-subspace energy**: % of each unit frame vector's squared norm inside the span of the run's base "
-             "class texts (26-d), novel class texts (25-d) and both (51-d); a random direction puts ~5 / 5 / 10 % there. "
-             "`Δ vs CLIP` = unit(final) − unit(zero-shot CLIP) on the same frame.")
+def text_energy(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
+    rep.section("5. Text-subspace energy", "% of each unit frame vector's squared norm inside the span of the run's "
+                "base class texts (26-d), novel class texts (25-d) and both (51-d); a random direction puts ~5 / 5 / "
+                "10 % there. `Δ vs CLIP` = unit(final) − unit(zero-shot CLIP) on the same frame.")
     rows, energies = [], {}
     for r in runs:
         bases = {"base": text_basis(r.classes(sp["base"])), "novel": text_basis(r.classes(sp["novel"]))}
@@ -424,36 +368,34 @@ def field_geometry(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> 
             quantities = {"embedding": r.emb(sp[key])}
             if clip is not None and not r.is_clip:
                 quantities["Δ vs CLIP"] = F.normalize(r.emb(sp[key]), dim=-1) - F.normalize(clip.emb(sp[key]), dim=-1)
-            if r.has_field:
-                quantities["backbone f"] = r.emb(sp[key], "backbone")
-                quantities["field g"] = r.emb(sp[key], "field")
+            if r.has_cgas:
+                quantities["cgas g"] = r.emb(sp[key], "cgas")
             for q, x in quantities.items():
                 e = {b: energy(x, basis) for b, basis in bases.items()}
                 energies.setdefault(r.name, {}).setdefault(key, {})[q] = e
                 rows.append([r.name, q, key, e["base"], e["novel"], e["both"]])
     rep.table(["run", "quantity", "videos", "in base-text span %", "in novel-text span %", "in both %"], rows)
-    rep.metrics["field_geometry"] = out
     rep.metrics["text_energy"] = energies
 
 
-def field_targets(rep: Report, runs: list[Run], sp: dict) -> None:
-    field_runs = [r for r in runs if r.has_field]
-    if not field_runs:
+def cgas_targets(rep: Report, runs: list[Run], sp: dict) -> None:
+    cgas_runs = [r for r in runs if r.has_cgas]
+    if not cgas_runs:
         return
-    rep.section("7. Where the field points for each novel class",
-                "Mean unit field direction over a novel class's frames, matched against all 51 class texts: its nearest "
+    rep.section("6. Where the CGAS head points for each novel class",
+                "Mean unit head direction over a novel class's frames, matched against all 51 class texts: its nearest "
                 "text, and the rank of the true class among the 51.")
     out = {}
-    for r in field_runs:
+    for r in cgas_runs:
         names = [short(c) for c in r.splits[sp["base"]]["classnames"]] + \
                 [short(c) for c in r.splits[sp["novel"]]["classnames"]]
         cb = len(r.splits[sp["base"]]["classnames"])
         union = torch.cat([r.classes(sp["base"]), r.classes(sp["novel"])])
         s, y = r.splits[sp["novel"]], r.y(sp["novel"])
-        g = F.normalize(s["field"].float(), dim=-1).mean((1, 2))
+        g = F.normalize(s["cgas"].float(), dim=-1).mean((1, 2))
         f = F.normalize(s["head"].float(), dim=-1).mean((1, 2))
         final_pred = r.logits(sp["novel"]).sum(1).argmax(-1)
-        field_pred = r.logits(sp["novel"], "field").sum(1).argmax(-1)
+        cgas_pred = r.logits(sp["novel"], "cgas").sum(1).argmax(-1)
         rows, to_base = [], 0
         for c in y.unique().tolist():
             m = y == c
@@ -465,83 +407,81 @@ def field_targets(rep: Report, runs: list[Run], sp: dict) -> None:
             to_base += nearest < cb
             tag = lambda i: f"{names[i]} ({'base' if i < cb else 'novel'})"  # noqa: E731
             rows.append([names[cb + c], 100 * (final_pred[m] == c).float().mean().item(),
-                         100 * (field_pred[m] == c).float().mean().item(), tag(nearest), sims[nearest].item(), rank,
+                         100 * (cgas_pred[m] == c).float().mean().item(), tag(nearest), sims[nearest].item(), rank,
                          tag(f_nearest)])
         rows.sort(key=lambda row: row[2])
         out[r.name] = {"novel_classes_pointing_to_base": to_base, "rows": rows}
-        rep.text(f"**{r.name}**: the field's mean direction is nearest a BASE class text for {to_base} of "
+        rep.text(f"**{r.name}**: the CGAS head's mean direction is nearest a BASE class text for {to_base} of "
                  f"{len(rows)} novel classes.")
-        rep.table(["novel class", "final acc", "field acc", "field → nearest text", "cos", "true rank /51",
+        rep.table(["novel class", "final acc", "cgas acc", "cgas → nearest text", "cos", "true rank /51",
                    "backbone → nearest text"], rows)
-    rep.metrics["field_targets"] = out
+    rep.metrics["cgas_targets"] = out
 
 
-def field_scores(r: Run, split: str, pooled: torch.Tensor) -> tuple[float, float]:  # field-alone and final top1
-    g, classes, y = field_apply(r.field_embed, pooled), r.classes(split), r.y(split)
-    head = r.splits[split]["head"].float()
-    return top1(view_logits(g, classes, r.scale), y), top1(view_logits(head + r.alpha * g, classes, r.scale), y)
+def cgas_scores(r: Run, split: str, pooled: torch.Tensor) -> float:  # the CGAS head's own top1
+    g, classes, y = cgas_apply(r.cgas_head, pooled), r.classes(split), r.y(split)
+    return top1(view_logits(g, classes, r.scale), y)
 
 
-def field_layers(rep: Report, runs: list[Run], sp: dict) -> None:
-    field_runs = [r for r in runs if r.has_field]
-    if not field_runs:
+def cgas_layers(rep: Report, runs: list[Run], sp: dict) -> None:
+    cgas_runs = [r for r in runs if r.has_cgas]
+    if not cgas_runs:
         return
-    rep.section("8. Which blocks the field reads",
-                "Mean-ablation: block ℓ's 64 pooled values replaced by their train-split mean (field alone and final); "
-                "only-ℓ: every other block mean-replaced; weight energy = ‖W1[:, ℓ]·std_ℓ‖ share.")
+    rep.section("7. Which blocks the CGAS head reads",
+                "Mean-ablation: block ℓ's 64 pooled values replaced by their train-split mean; only-ℓ: every other "
+                "block mean-replaced; weight energy = ‖W1[:, ℓ]·std_ℓ‖ share. Top1 is the head's own classifier.")
     out = {}
     ref_key = "train" if "train" in sp else "base"
-    for r in field_runs:
-        ref_pooled = r.splits[sp[ref_key]]["pooled"].float()
+    for r in cgas_runs:
+        block_idx = r.cgas_block_idx  # which of the 12 dumped blocks this run's cgas_head actually reads
+        ref_pooled = r.pooled(sp[ref_key])
         depth = ref_pooled.shape[-2]
         ref = ref_pooled.reshape(-1, depth, ref_pooled.shape[-1]).mean(0)
         std = ref_pooled.reshape(-1, depth, ref_pooled.shape[-1]).std(0)
-        w1 = r.field_embed["net.1.weight"].view(-1, depth, ref.shape[-1])
+        w1 = r.cgas_head["net.1.weight"].view(-1, depth, ref.shape[-1])
         weight = torch.stack([(w1[:, l] * std[l]).norm() for l in range(depth)])
         weight = (100 * weight / weight.sum()).tolist()
-        res = {"weight_energy": weight}
+        res = {"weight_energy": weight, "blocks": [b + 1 for b in block_idx]}
         for key in ("base", "novel"):
-            pooled = r.splits[sp[key]]["pooled"].float()
-            full = field_scores(r, sp[key], pooled)
+            pooled = r.pooled(sp[key])
+            full = cgas_scores(r, sp[key], pooled)
             ablate, only = [], []
             for l in range(depth):
                 p = pooled.clone()
                 p[..., l, :] = ref[l]
-                ablate.append(field_scores(r, sp[key], p))
+                ablate.append(cgas_scores(r, sp[key], p))
                 p = ref.expand_as(pooled).clone()
                 p[..., l, :] = pooled[..., l, :]
-                only.append(field_scores(r, sp[key], p)[0])
-            res[key] = {"full_field": full[0], "full_final": full[1], "ablate_field": [a[0] for a in ablate],
-                        "ablate_final": [a[1] for a in ablate], "only_field": only}
+                only.append(cgas_scores(r, sp[key], p))
+            res[key] = {"full": full, "ablate": ablate, "only": only}
         out[r.name] = res
-        fig, axes = plt.subplots(2, 2, figsize=(10, 6))
-        xs = list(range(1, depth + 1))
+        fig, axes = plt.subplots(1, 3, figsize=(13, 3.2))
+        xs = res["blocks"]  # real 1-indexed block numbers, not 1..depth -- depth < 12 for a cgas_layers subset
         for key in ("base", "novel"):
             kw = dict(color=SPLIT_COLORS[key], ls=SPLIT_STYLES[key], marker="o", label=key)
-            axes[0, 0].plot(xs, [a - res[key]["full_field"] for a in res[key]["ablate_field"]], **kw)
-            axes[0, 1].plot(xs, [a - res[key]["full_final"] for a in res[key]["ablate_final"]], **kw)
-            axes[1, 0].plot(xs, res[key]["only_field"], **kw)
-        axes[1, 1].bar(xs, weight, color=INK2, width=0.7, edgecolor=SURFACE, linewidth=2)
-        for ax, title in zip(axes.flat, ("field alone: Δtop1 when block ℓ is mean-ablated",
-                                         "final: Δtop1 when block ℓ is mean-ablated",
-                                         "field alone: top1 with only block ℓ kept", "weight energy share (%)")):
+            axes[0].plot(xs, [a - res[key]["full"] for a in res[key]["ablate"]], **kw)
+            axes[1].plot(xs, res[key]["only"], **kw)
+        axes[2].bar(xs, weight, color=INK2, width=0.7, edgecolor=SURFACE, linewidth=2)
+        for ax, title in zip(axes, ("Δtop1 when block ℓ is mean-ablated",
+                                     "top1 with only block ℓ kept", "weight energy share (%)")):
             ax.set_title(title)
             ax.set_xlabel("block ℓ")
             ax.set_xticks(xs)
-        for ax in (axes[0, 0], axes[0, 1], axes[1, 0]):
+        for ax in axes[:2]:
             ax.legend()
-        axes[1, 1].grid(axis="x", visible=False)
+        axes[2].grid(axis="x", visible=False)
         fig.suptitle(r.name, fontsize=10, color=INK)
         fig.tight_layout()
-        rep.figure(fig, f"field_layers_{r.name}", f"field layer attribution {r.name}")
+        rep.figure(fig, f"cgas_layers_{r.name}", f"CGAS layer attribution {r.name}")
         rep.table(["block"] + [str(x) for x in xs],
                   [["weight %"] + weight] +
-                  [[f"{k} ablate Δfield"] + [a - res[k]["full_field"] for a in res[k]["ablate_field"]] for k in ("base", "novel")] +
-                  [[f"{k} ablate Δfinal"] + [a - res[k]["full_final"] for a in res[k]["ablate_final"]] for k in ("base", "novel")] +
-                  [[f"{k} only-ℓ field"] + res[k]["only_field"] for k in ("base", "novel")])
+                  [[f"{k} ablate Δtop1"] + [a - res[k]["full"] for a in res[k]["ablate"]] for k in ("base", "novel")] +
+                  [[f"{k} only-ℓ top1"] + res[k]["only"] for k in ("base", "novel")])
 
-        rep.text(f"**Transplant**: {r.name}'s field_embed applied to other models' pooled block CLS (scored with each "
-                 f"model's own text; final = that model's f + {r.alpha:g}·g).")
+        rep.text(f"**Transplant**: {r.name}'s cgas_head applied to other models' pooled block CLS (scored with each "
+                 f"model's own text). Sliced to {r.name}'s own block subset {res['blocks']} -- dump.py always "
+                 f"pools all 12 blocks, so this is available for any other run regardless of ITS OWN "
+                 f"cgas_layers setting.")
         rows = []
         for other in runs:
             if other.segments != r.segments:
@@ -549,18 +489,17 @@ def field_layers(rep: Report, runs: list[Run], sp: dict) -> None:
             acc = {}
             for key in ("base", "novel"):
                 s = other.splits[sp[key]]
-                g = field_apply(r.field_embed, s["pooled"])
-                acc[key] = (top1(view_logits(g, other.classes(sp[key]), r.scale), other.y(sp[key])),
-                            top1(view_logits(s["head"].float() + r.alpha * g, other.classes(sp[key]), r.scale), other.y(sp[key])))
-            rows.append([other.name, acc["base"][0], acc["novel"][0], acc["base"][1], acc["novel"][1],
-                         hm(acc["base"][1], acc["novel"][1])])
+                other_pooled = s["pooled"].float()[..., block_idx, :]
+                g = cgas_apply(r.cgas_head, other_pooled)
+                acc[key] = top1(view_logits(g, other.classes(sp[key]), r.scale), other.y(sp[key]))
+            rows.append([other.name, acc["base"], acc["novel"], hm(acc["base"], acc["novel"])])
             res.setdefault("transplant", {})[other.name] = acc
-        rep.table(["pooled from", "field base", "field novel", "final base", "final novel", "final HM"], rows)
-    rep.metrics["field_layers"] = out
+        rep.table(["pooled from", "cgas base", "cgas novel", "cgas HM"], rows)
+    rep.metrics["cgas_layers"] = out
 
 
 def separability(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("9. Class separability per block (nearest class mean, 5-fold within each split)",
+    rep.section("8. Class separability per block (nearest class mean, 5-fold within each split)",
                 "Label-supervised upper bound on what a readout of each block could separate, independent of the text "
                 "tower. Novel NCM far above novel zero-shot top-1 means the information is there but not aligned to text.")
     out, rows = {}, []
@@ -573,15 +512,14 @@ def separability(rep: Report, runs: list[Run], sp: dict) -> None:
             curve = {tok: [ncm(s[tok][:, l], y) for l in range(depth)] for tok in ("cls", "patch")}
             ends = {"embedding": ncm(video_mean(r.emb(sp[key])), y),
                     "pooled": ncm(s["pooled"].float().mean((1, 2)).flatten(1), y)}
-            if r.has_field:
-                ends["backbone f"] = ncm(video_mean(r.emb(sp[key], "backbone")), y)
-                ends["field g"] = ncm(video_mean(r.emb(sp[key], "field")), y)
+            if r.has_cgas:
+                ends["cgas g"] = ncm(video_mean(r.emb(sp[key], "cgas")), y)
             res[key] = {**curve, **ends}
             for i, tok in enumerate(("cls", "patch")):
                 axes[i, j].plot(range(1, depth + 1), curve[tok], color=r.color, marker="o")
             rows.append([r.name, key, curve["cls"][-1], curve["patch"][-1],
                          f"{max(curve['cls']):.2f} @ {curve['cls'].index(max(curve['cls'])) + 1}",
-                         ends["pooled"], ends["embedding"], ends.get("backbone f", "-"), ends.get("field g", "-")])
+                         ends["pooled"], ends["embedding"], ends.get("cgas g", "-")])
         out[r.name] = res
     for i, tok in enumerate(("CLS", "patch mean")):
         for j, key in enumerate(("base", "novel")):
@@ -593,13 +531,13 @@ def separability(rep: Report, runs: list[Run], sp: dict) -> None:
     legend_runs(axes[0, 0], runs)
     fig.tight_layout()
     rep.figure(fig, "layer_ncm", "class separability per block")
-    rep.table(["run", "split", "CLS @12", "patch @12", "best CLS @block", "field input (pooled)", "embedding",
-               "backbone f", "field g"], rows)
+    rep.table(["run", "split", "CLS @12", "patch @12", "best CLS @block", "cgas input (pooled)", "embedding",
+               "cgas g"], rows)
     rep.metrics["separability"] = out
 
 
 def drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
-    rep.section("10. Drift from pretrained CLIP per block, and the KI stream",
+    rep.section("9. Drift from pretrained CLIP per block, and the KI stream",
                 "Linear CKA between a run's per-video block tokens and zero-shot CLIP's on the same videos; "
                 "for KI runs, the student stream vs the frozen stream at each injection point (CLS, video mean).")
     out = {}
@@ -649,7 +587,7 @@ def drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
 
 
 def text_drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
-    rep.section("11. Text tower", "cos(run class text, CLIP class text) per class; crowding = mean pairwise cosine "
+    rep.section("10. Text tower", "cos(run class text, CLIP class text) per class; crowding = mean pairwise cosine "
                 "between a split's class texts; nearest = mean cosine to the nearest other class in the same split.")
     rows, out, labelled = [], {}, set()
     shown = [r for r in runs if not r.is_clip]
@@ -680,7 +618,7 @@ def text_drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None
 
 
 def confidence(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("12. Confidence and calibration", "Softmax of the view-averaged logits (final). ECE with 15 bins; "
+    rep.section("11. Confidence and calibration", "Softmax of the view-averaged logits (final). ECE with 15 bins; "
                 "margin = top1 − top2 probability.")
     rows, out = [], {}
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.6))
@@ -702,7 +640,7 @@ def confidence(rep: Report, runs: list[Run], sp: dict) -> None:
 
 
 def structure(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("13. Embedding structure", "Per-video unit embeddings: effective rank (exp entropy of the centred "
+    rep.section("12. Embedding structure", "Per-video unit embeddings: effective rank (exp entropy of the centred "
                 "spectrum) and Fisher ratio (between- over within-class scatter, higher = tighter classes).")
     rows, out = [], {}
     for r in runs:
@@ -717,7 +655,7 @@ def structure(rep: Report, runs: list[Run], sp: dict) -> None:
 
 
 def per_class(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("14. Per-class accuracy", "Final top-1 per class; CSVs next to this report. Classes sorted by the last "
+    rep.section("13. Per-class accuracy", "Final top-1 per class; CSVs next to this report. Classes sorted by the last "
                 "run's accuracy.")
     out = {}
     for key in ("base", "novel"):
@@ -758,12 +696,12 @@ def per_class(rep: Report, runs: list[Run], sp: dict) -> None:
 
 
 def transitions(rep: Report, runs: list[Run], sp: dict) -> None:
-    rep.section("15. Correctness transitions", "Videos (summed over views) right in both, gained, lost, wrong in both, "
-                "for consecutive runs and inside each field run.")
+    rep.section("14. Correctness transitions", "Videos (summed over views) right in both, gained, lost, wrong in both, "
+                "for consecutive runs and final vs. the CGAS head's own classifier inside each CGAS run.")
     pairs = [((a, "final"), (b, "final")) for a, b in zip(runs, runs[1:])]
     for r in runs:
-        if r.has_field:
-            pairs += [((r, "backbone"), (r, "final")), ((r, "backbone"), (r, "field"))]
+        if r.has_cgas:
+            pairs.append(((r, "final"), (r, "cgas")))
     rows = []
     for (a, va), (b, vb) in pairs:
         for key in ("base", "novel"):
@@ -776,7 +714,7 @@ def transitions(rep: Report, runs: list[Run], sp: dict) -> None:
 
 
 def confusions(rep: Report, runs: list[Run], sp: dict, top: int = 8) -> None:
-    rep.section("16. Top novel confusions", "true → predicted (final), with the cosine between the two class texts "
+    rep.section("15. Top novel confusions", "true → predicted (final), with the cosine between the two class texts "
                 "in that run's text space.")
     out = {}
     for r in runs:
@@ -804,8 +742,8 @@ def curves(rep: Report, runs: list[Run]) -> None:
             histories[r.name] = (r, json.loads(path.read_text()))
     if not histories:
         return
-    rep.section("17. Training curves", "Per-epoch means from history.json.")
-    keys = [("ce", "CE (main)"), ("kd", "distillation"), ("field_ce", "field CE"), ("top1", "train top1")]
+    rep.section("16. Training curves", "Per-epoch means from history.json.")
+    keys = [("ce", "CE (main)"), ("kd", "distillation"), ("cgas_ce", "cgas CE"), ("top1", "train top1")]
     fig, axes = plt.subplots(1, len(keys), figsize=(13, 3))
     for ax, (k, title) in zip(axes, keys):
         for r, hist in histories.values():
@@ -853,11 +791,10 @@ def main() -> None:
     for step in (sanity, accuracy):
         step(rep, runs, sp)
     tower_swap(rep, runs, clip, sp)
-    alpha_sweep(rep, runs, sp)
     zeroshot_ensemble(rep, runs, clip, sp)
     base_pull(rep, runs, sp)
-    field_geometry(rep, runs, clip, sp)
-    for step in (field_targets, field_layers, separability):
+    text_energy(rep, runs, clip, sp)
+    for step in (cgas_targets, cgas_layers, separability):
         step(rep, runs, sp)
     drift(rep, runs, clip, sp)
     text_drift(rep, runs, clip, sp)

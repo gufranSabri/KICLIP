@@ -1,0 +1,14 @@
+# CGAS: Capacity-Gated Auxiliary Supervision. Every vision block's CLS, dropout-pooled to a narrow width, feeds
+# an open-vocabulary head trained on the base labels plus frozen CLIP's softened class distribution. The width
+# is narrow enough that the head cannot fit its own loss without pushing gradient back into the shared backbone
+# (see docs/cgas.md); the head's output is never added back into the video embedding.
+model:
+  cgas_enabled: true
+  cgas_source: student # student | teacher | both
+  cgas_segments: 64 # pooled feature-dim size (M); the width must be divisible by this
+  cgas_pool_modes: [dropout] # resampled once per training step from mean|max|min|dropout; eval always uses mean
+  cgas_dropout_p: 0.3 # dropout pool mode only: fraction of each segment dropped before the survivor mean
+  cgas_ce_weight: 1.0 # weight of the CGAS loss in the total loss
+  cgas_lr: 3.33e-4 # separate LR for the CGAS head's params
+  cgas_target: both # label = CE on base labels | teacher = KL to frozen CLIP's class distribution | both
+  cgas_tau: 2.0 # softmax temperature of the teacher target (KL scaled by tau^2)
