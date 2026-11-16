@@ -1,16 +1,16 @@
 # KICLIP
 
-**Knowledge Injection Improves Distillation: open-vocabulary action recognition built on FROSTER (ICLR 2024).**
+**Drift Damping Improves Distillation: open-vocabulary action recognition built on FROSTER (ICLR 2024).**
 
 A student CLIP is fine-tuned on videos while it is kept close to the original CLIP in two ways:
 
 1. **Distillation (FROSTER)**: residual projectors on the student's frame and class features (`x + 0.1 * MLP(x)`)
    are pulled to a frozen CLIP teacher's with a cosine loss, weighted by `model.distill_weight`.
-2. **Knowledge injection (KICLIP)**: before every student vision block, its tokens are averaged with the frozen
-   teacher's tokens at the same depth (`model.inject`). The teacher's forward pass is shared with distillation, so
-   injection costs no extra compute in training. It is active at test time too. The original KICLIP instead ran
-   frozen copies of the blocks on the student's own stem and backpropagated through them
-   (`model.inject_source: blocks`, about 1.36x the training FLOPs).
+2. **Drift damping (KICLIP)**: before every student vision block, its tokens are averaged with the frozen
+   teacher's tokens at the same depth (`model.drift_damping`). The teacher's forward pass is shared with distillation,
+   so drift damping costs no extra compute in training. It is active at test time too. The original KICLIP instead
+   ran frozen copies of the blocks on the student's own stem and backpropagated through them
+   (`model.drift_damping_source: blocks`, about 1.36x the training FLOPs).
 3. **Aux classifier (training only, needs distillation on)**: a fresh MLP on the pooled, distillation-projected
    video embedding, trained with cross-entropy on the training classes alongside the rest of the loss. In
    reference/KICLIP this head is seeded from a pretrained ImageNet ViT-B/16 classifier and its loss is computed but
@@ -25,8 +25,8 @@ the weights after epochs `train.average_from..train.epochs`.
 ```
 kiclip.py              CLI: train / test
 kiclip.slurm           batch job running every experiment for $METHODS, then the tables
-src/models/clip.py     OpenAI CLIP as plain modules (names match the checkpoints), temporal attention, injection
-src/models/kiclip.py   student wrapper: frozen teacher (injection + distillation), projectors, distillation loss
+src/models/clip.py     OpenAI CLIP as plain modules (names match the checkpoints), temporal attention, drift damping
+src/models/kiclip.py   student wrapper: frozen teacher (drift damping + distillation), projectors, distillation loss
 src/eigencam.py        EigenCAM over the vision blocks
 src/data/              PyAV decoding, clip sampling and transforms, prompt templates
 src/train.py           training loop (AMP, DDP, resume, online weight averaging)
@@ -98,7 +98,7 @@ A split is `<protocol>/<dataset>/<set>`, i.e. `splits/<protocol>/<dataset>/<set>
 
 `configs/default.yaml` is KICLIP. Stack a method overlay after the dataset config to pick the method explicitly:
 
-| Overlay | `model.inject` | `model.inject_source` |
+| Overlay | `model.drift_damping` | `model.drift_damping_source` |
 |---|---|---|
 | `configs/methods/kiclip.yaml` | true | `teacher` |
 | `configs/methods/kiclip_blocks.yaml` (original KICLIP) | true | `blocks` |
@@ -119,7 +119,7 @@ python kiclip.py --config configs/cross/k400.yaml test --checkpoint runs/cross_k
 `--config` can be repeated (later files win) and `--set key=value` overrides any key, on either side of the
 subcommand. `test` evaluates `data.test` unless `--splits` is given and merges every split's top1/top5 into one
 `results.json` next to the checkpoint: `base`, `novel` and `HM` for base-to-novel, `<dataset>/<set>` otherwise. It also loads the original FROSTER and KICLIP releases (`swa_2_22.pth`, the latter with
-`configs/methods/kiclip_blocks.yaml`). `test` checks that the config injects the way the checkpoint was trained.
+`configs/methods/kiclip_blocks.yaml`). `test` checks that the config damps the way the checkpoint was trained.
 
 Multi-GPU runs go through `torchrun`; `train.batch_size` is global and split evenly across GPUs per step, as in
 reference/KICLIP — no gradient accumulation:
@@ -141,22 +141,23 @@ python scripts/figures/eigencam.py --video some_clip.mp4 --checkpoints clip runs
 
 One row per checkpoint (`clip` = the pretrained CLIP), one column per vision block (`--layers`, default 5–12,
 1-indexed block outputs), on the middle frame of the middle test view (`--frames`, `--view`). Each checkpoint is
-rebuilt from its own weights and config, with injection detected from its weights. Maps follow pytorch-grad-cam's
+rebuilt from its own weights and config, with drift damping detected from its weights. Maps follow pytorch-grad-cam's
 EigenCAM: first principal component of the patch tokens, ReLU, min-max, bilinear upsampling, jet overlay at 0.5.
 Writes `docs/figures/eigencam/<video>.png` and `.pdf`.
 
 ## Experiments
 
 ```bash
-bash scripts/experiments/b2n.sh              # every method x dataset x seed: train, then test base + novel
-bash scripts/experiments/cross_dataset.sh    # every method: K400 -> UCF101 / HMDB51 / K600
+bash scripts/experiments/run_b2n.sh          # hmdb51/ucf101/k400 x {froster, drift damping, cgas}: train,
+                                              # test base + novel, then one EigenCAM grid per dataset
+bash scripts/experiments/seed_ablation.sh    # cgas only: 3 seeds (hmdb51/ucf101) or 3 splits (k400)
+bash scripts/experiments/run_zeroshot.sh     # K400 (PERCENT% of it, default 5) -> UCF101 / HMDB51 / K600
 python scripts/tables/b2n.py                 # docs/tables/b2n.md, per method, with FROSTER's paper numbers
 python scripts/tables/cross_dataset.py       # docs/tables/cross_dataset.md
 mkdir -p slurm && sbatch kiclip.slurm        # all of the above on 4 L40S
 ```
 
-Both scripts skip finished work (`RERUN=1` forces it), run `METHODS="kiclip froster"` by default (any overlay name
-works) and take `LAUNCH="torchrun --standalone --nproc_per_node=N"`.
+scripts/experiments/run_b2n.sh skips finished work (an existing `averaged.pt`/`results.json` is reused).
 
 ## Differences from the original code
 

@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, Subset
 from src.config import Config
 from src.data.dataset import VideoDataset
 from src.data.prompts import tokenize
-from src.models.clip import has_injection
+from src.models.clip import has_drift_damping
 from src.models.kiclip import KICLIP, build_kiclip, class_features, clip_logits
 from src.utils import dist
 from src.utils.logger import get_logger
@@ -100,19 +100,19 @@ def load_weights(path: Path) -> tuple[dict[str, torch.Tensor], dict | None]:
     return state, ckpt.get("config")
 
 
-def injection(model: dict) -> str | None:
-    # a saved model config's injection source, None when off; configs from before inject_source used blocks
-    return model.get("inject_source", "blocks") if model["inject"] else None
+def drift_damping_source(model: dict) -> str | None:
+    # a saved model config's drift-damping source, None when off; configs from before drift_damping_source used blocks
+    return model.get("drift_damping_source", "blocks") if model["drift_damping"] else None
 
 
 def _check_config(ckpt_cfg: dict | None, cfg: Config) -> None:
     if ckpt_cfg is None:
         logger.warning("checkpoint carries no config; evaluating with this config's model.temporal / data.num_frames")
         return
-    trained, now = injection(ckpt_cfg["model"]), injection(cfg.to_dict()["model"])
+    trained, now = drift_damping_source(ckpt_cfg["model"]), drift_damping_source(cfg.to_dict()["model"])
     if trained != now:
         raise ValueError(
-            f"checkpoint was trained with injection from {trained or 'nothing'}, this config injects from "
+            f"checkpoint was trained with drift damping from {trained or 'nothing'}, this config damps from "
             f"{now or 'nothing'}; stack the matching configs/methods/*.yaml"
         )
     for section, key in (("model", "temporal"), ("data", "num_frames"), ("data", "sampling_rate")):
@@ -141,11 +141,12 @@ def test(cfg: Config, checkpoint: str | Path, splits: list[str] | None = None) -
     state, ckpt_cfg = load_weights(path)
     _check_config(ckpt_cfg, cfg)
     weights = {k[len("model."):]: v for k, v in state.items() if k.startswith("model.")}
-    source = injection(cfg.to_dict()["model"])
-    if has_injection(weights) != (source == "blocks"):
+    source = drift_damping_source(cfg.to_dict()["model"])
+    if has_drift_damping(weights) != (source == "blocks"):
         raise ValueError(
-            f"{path} has frozen injection blocks; test it with configs/methods/kiclip_blocks.yaml"
-            if has_injection(weights) else f"{path} lacks the frozen injection blocks model.inject_source=blocks needs"
+            f"{path} has frozen drift-damping blocks; test it with configs/methods/kiclip_blocks.yaml"
+            if has_drift_damping(weights)
+            else f"{path} lacks the frozen drift-damping blocks model.drift_damping_source=blocks needs"
         )
     model = build_kiclip(cfg, weights).to(device)
     # build_kiclip only loads the inner CLIP submodule from `weights`; load the rest of the checkpoint (cgas_head,
@@ -153,7 +154,7 @@ def test(cfg: Config, checkpoint: str | Path, splits: list[str] | None = None) -
     model.load_state_dict(state, strict=False)
 
     logger.info("checkpoint   : %s", path)
-    logger.info("model        : temporal %s | injection from %s", cfg.model.temporal, source or "nothing")
+    logger.info("model        : temporal %s | drift damping from %s", cfg.model.temporal, source or "nothing")
     logger.info("device       : %s x %d", device, world)
     logger.info("views        : %d clips x %d frames, crop %d", cfg.test.views, cfg.data.num_frames, cfg.data.crop_size)
 

@@ -2,8 +2,8 @@
 # Dumps what report.py analyses: per-frame embeddings and CGAS inputs, per-block CLS / patch-mean / frozen-stream
 # tokens and class text features, for zero-shot CLIP and every run, over data.train + data.test. One decode per batch.
 #
-#     python scripts/analysis/dump.py --config configs/b2n/hmdb51.yaml \
-#         --runs runs/froster runs/ki runs/cgas
+#     python scripts/analysis/dump.py --config configs/b2n/default/hmdb51.yaml \
+#         --runs runs/froster runs/dd runs/cgas
 
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ from src.utils.progress import progress  # noqa: E402
 from src.utils.seed import pick_device, seed_everything  # noqa: E402
 
 CLIP_NAME = "clip"
-RUNS = ("runs/froster", "runs/ki", "runs/cgas")
+RUNS = ("runs/froster", "runs/dd", "runs/cgas")
 
 
 class Recorder:
-    # forward hooks: every student block's output, every frozen block's input (the KI stream), ln_post's output
+    # forward hooks: every student block's output, every frozen block's input (the drift-damping stream), ln_post's output
     def __init__(self, model: KICLIP):
         visual = model.model.visual
         self.cls: list[torch.Tensor] = []
@@ -40,7 +40,7 @@ class Recorder:
         self.head: torch.Tensor | None = None
         for block in visual.transformer.resblocks:
             block.register_forward_hook(self._block)
-        for block in visual.transformer.resblocks_f or []:
+        for block in visual.transformer.resblocks_dd or []:
             block.register_forward_pre_hook(self._stream)
         visual.ln_post.register_forward_hook(self._head)
 
@@ -154,7 +154,7 @@ def main() -> None:
     ap.add_argument("--no-clip", action="store_true", help="skip the zero-shot CLIP reference")
     ap.add_argument("--splits", nargs="+", default=None, help="default: data.train + data.test")
     ap.add_argument("--segments", type=int, default=64, help="pooling width for runs without a CGAS head")
-    ap.add_argument("--config", action="append", default=[], help="dataset config (default configs/b2n/hmdb51.yaml)")
+    ap.add_argument("--config", action="append", default=[], help="dataset config (default configs/b2n/default/hmdb51.yaml)")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VAL", help="override a config key")
     ap.add_argument("--out", default="runs/analysis/dumps")
     args = ap.parse_args()
@@ -173,7 +173,7 @@ def main() -> None:
         raise SystemExit(f"run names collide: {names}; dump them in separate calls with different --out")
     for e in entries:
         print(f"  {e.name:28s} {e.checkpoint} | cgas {'on' if e.model.cgas_head is not None else 'off'} "
-              f"| KI blocks {'on' if e.model.model.visual.transformer.resblocks_f is not None else 'off'}")
+              f"| drift-damping blocks {'on' if e.model.model.visual.transformer.resblocks_dd is not None else 'off'}")
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

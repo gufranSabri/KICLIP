@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-# Dumps every run under runs/ as its own CSV row, base/novel/hm, no averaging across seeds.
+# Dumps every run under --runs-root as its own CSV row, base/novel/hm, no averaging across seeds.
+# --out defaults to docs/tables/<subfolder>.csv, named after --runs-root's subfolder under runs/
+# (e.g. runs/field_study -> docs/tables/field_study.csv). --runs-root runs itself has no subfolder
+# to name the table after, so it is refused unless --out is given explicitly.
 #
-#     python scripts/tables/runs_csv.py
+#     python scripts/tables/runs_csv.py --runs-root runs/field_study
 
 from __future__ import annotations
 
@@ -17,15 +20,23 @@ from scripts.tables.collect_runs import load_runs  # noqa: E402
 from src.utils.metrics import harmonic_mean  # noqa: E402
 
 
+def default_out(runs_root: Path) -> Path:
+    runs_root = runs_root.resolve()
+    if runs_root == (REPO_ROOT / "runs").resolve():
+        raise SystemExit("oops cant do this: --runs-root is runs itself, pass a subfolder or --out explicitly")
+    return REPO_ROOT / "docs" / "tables" / f"{runs_root.name}.csv"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs-root", default=str(REPO_ROOT / "runs"))
-    ap.add_argument("--out", default=str(REPO_ROOT / "docs" / "tables" / "runs.csv"))
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    runs_root, out_path = Path(args.runs_root), Path(args.out)
+    runs_root = Path(args.runs_root)
     if not runs_root.is_dir():
         raise SystemExit(f"no runs directory at {runs_root}")
+    out_path = Path(args.out) if args.out else default_out(runs_root)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = []

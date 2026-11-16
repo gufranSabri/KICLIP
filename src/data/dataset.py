@@ -30,9 +30,10 @@ class VideoDataset(Dataset):
         self.span = d.num_frames * d.sampling_rate / d.target_fps
         self.scales, self.crop, self.flip = (d.train_scales[0], d.train_scales[1]), d.crop_size, d.flip
         self.classnames = load_descriptions(cfg.split_classes(split))
-        self.paths, self.labels = self._read(cfg.split_csv(split))
+        fraction = d.train_fraction if train else 1.0
+        self.paths, self.labels = self._read(cfg.split_csv(split), fraction, cfg.seed)
 
-    def _read(self, csv: Path) -> tuple[list[Path], list[int]]:
+    def _read(self, csv: Path, fraction: float, seed: int) -> tuple[list[Path], list[int]]:
         rows = [line.rsplit(",", 1) for line in csv.read_text().splitlines() if line.strip()]
         paths = [self.root / p.strip() for p, _ in rows]
         labels = [int(label) for _, label in rows]
@@ -50,6 +51,12 @@ class VideoDataset(Dataset):
                            self.split, len(paths) - len(keep), len(paths), self.root, first)
         if not keep:
             raise FileNotFoundError(f"{self.split}: none of the {len(paths)} videos exist under {self.root}")
+        if fraction < 1.0:
+            rng = random.Random(seed)
+            n = max(1, round(len(keep) * fraction))
+            keep = sorted(rng.sample(keep, n))
+            logger.info("%s: data.train_fraction=%g keeps %d/%d videos (seed %d)",
+                       self.split, fraction, len(keep), len(found), seed)
         return [paths[i] for i in keep], [labels[i] for i in keep]
 
     def __len__(self) -> int:

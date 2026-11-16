@@ -12,7 +12,7 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
 VALID_ARCHS = ("ViT-B-32", "ViT-B-16", "ViT-L-14")
 VALID_TEMPORAL = ("expand",)
-VALID_INJECT_SOURCES = ("teacher", "blocks")
+VALID_DRIFT_DAMPING_SOURCES = ("teacher", "blocks")
 VALID_CGAS_SOURCES = ("student", "teacher", "both")
 VALID_CGAS_POOL_MODES = ("mean", "max", "min", "dropout")
 VALID_CGAS_TARGETS = ("label", "teacher", "both")
@@ -27,8 +27,9 @@ CROSS_TEST = (
 class ModelConfig:
     arch: str = "ViT-B-16"
     temporal: str | None = "expand"
-    inject: bool = True
-    inject_source: str = "teacher"
+    drift_damping: bool = True
+    drift_damping_source: str = "teacher"
+    drift_damping_weight: list[float] = field(default_factory=lambda: [0.5, 0.5])  # [student, frozen], unnormalized
     distill_weight: float = 2.0
     residual_alpha: float = 0.1
     aux_classifier: bool = True
@@ -61,6 +62,7 @@ class DataConfig:
     crop_size: int = 224
     flip: bool = True
     num_workers: int = 8
+    train_fraction: float = 1.0  # randomly keep only this fraction of data.train's videos, seeded by `seed`
 
 
 @dataclass
@@ -127,8 +129,14 @@ class Config:
             raise ValueError(f"model.arch must be one of {VALID_ARCHS}, got {m.arch!r}")
         if m.temporal is not None and m.temporal not in VALID_TEMPORAL:
             raise ValueError(f"model.temporal must be one of {VALID_TEMPORAL} or null, got {m.temporal!r}")
-        if m.inject_source not in VALID_INJECT_SOURCES:
-            raise ValueError(f"model.inject_source must be one of {VALID_INJECT_SOURCES}, got {m.inject_source!r}")
+        if m.drift_damping_source not in VALID_DRIFT_DAMPING_SOURCES:
+            raise ValueError(
+                f"model.drift_damping_source must be one of {VALID_DRIFT_DAMPING_SOURCES}, got {m.drift_damping_source!r}"
+            )
+        if len(m.drift_damping_weight) != 2 or any(w < 0 for w in m.drift_damping_weight):
+            raise ValueError(
+                f"model.drift_damping_weight must be [student, frozen] with both >= 0, got {m.drift_damping_weight!r}"
+            )
         if m.distill_weight < 0:
             raise ValueError("model.distill_weight must be >= 0")
         if m.residual_alpha < 0:
@@ -174,6 +182,8 @@ class Config:
             raise ValueError(f"data.crop_size ({d.crop_size}) must be <= data.train_scales[0] ({d.train_scales[0]})")
         if d.num_workers < 0:
             raise ValueError("data.num_workers must be >= 0")
+        if not 0 < d.train_fraction <= 1:
+            raise ValueError(f"data.train_fraction must be in (0, 1], got {d.train_fraction!r}")
 
         if t.epochs < 1:
             raise ValueError("train.epochs must be >= 1")

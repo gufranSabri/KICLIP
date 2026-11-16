@@ -3,7 +3,7 @@
 # the joint label space, layer-wise separability and drift, text drift, calibration, per-class results, curves.
 #
 #     OMP_NUM_THREADS=1 python scripts/analysis/report.py --dumps runs/analysis/dumps \
-#         --runs froster ki cgas --out docs/analysis
+#         --runs froster dd cgas --out docs/analysis
 
 from __future__ import annotations
 
@@ -537,9 +537,9 @@ def separability(rep: Report, runs: list[Run], sp: dict) -> None:
 
 
 def drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
-    rep.section("9. Drift from pretrained CLIP per block, and the KI stream",
+    rep.section("9. Drift from pretrained CLIP per block, and the drift-damping stream",
                 "Linear CKA between a run's per-video block tokens and zero-shot CLIP's on the same videos; "
-                "for KI runs, the student stream vs the frozen stream at each injection point (CLS, video mean).")
+                "for drift-damping runs, the student stream vs the frozen stream at each damping point (CLS, video mean).")
     out = {}
     if clip is not None:
         shown = [r for r in runs if not r.is_clip]
@@ -561,11 +561,11 @@ def drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
         rep.table(["run", "split"] + [f"CLS b{l}" for l in (1, 4, 8, 10, 11, 12)] + [f"patch b{l}" for l in (4, 8, 12)],
                   [[name, key] + [m[key]["cls"][l - 1] for l in (1, 4, 8, 10, 11, 12)] + [m[key]["patch"][l - 1] for l in (4, 8, 12)]
                    for name, m in out.items() for key in ("base", "novel")])
-    ki = [r for r in runs if "stream" in r.splits[sp["base"]]]
-    if ki:
+    dd = [r for r in runs if "stream" in r.splits[sp["base"]]]
+    if dd:
         fig, axes = plt.subplots(1, 3, figsize=(12, 3.2))
         stream_out = {}
-        for r in ki:
+        for r in dd:
             for key in ("base", "novel"):
                 s = r.splits[sp[key]]
                 h, t = s["cls"][:, :-1], s["stream"][:, 1:]  # block i+1 averages the student's block-i output with t_i
@@ -578,11 +578,11 @@ def drift(rep: Report, runs: list[Run], clip: Run | None, sp: dict) -> None:
                     ax.plot(xs, curve[q], color=r.color, ls=SPLIT_STYLES[key], marker="o")
         for ax, title in zip(axes, ("cos(student, frozen)", "CKA(student, frozen)", "‖student‖ / ‖frozen‖")):
             ax.set_title(title)
-            ax.set_xlabel("injection before block")
+            ax.set_xlabel("drift damping before block")
             ax.set_xticks(range(2, 13))
-        legend_runs(axes[0], ki, styles=True)
-        rep.figure(fig, "ki_stream", "student vs frozen stream at each injection point")
-        rep.metrics["ki_stream"] = stream_out
+        legend_runs(axes[0], dd, styles=True)
+        rep.figure(fig, "dd_stream", "student vs frozen stream at each drift-damping point")
+        rep.metrics["dd_stream"] = stream_out
     rep.metrics["drift"] = out
 
 

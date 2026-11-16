@@ -51,7 +51,7 @@ POOL_RUNS = {"mean": ("field_pool_mean_last1", 64), "dropout": ("field_layers_la
 MASKS = 64
 WIDTH_RUNS = {16: "field_mean_seg16_last1", 32: "field_mean_seg32_last1", 64: "field_pool_mean_last1",
               128: "field_mean_seg128_last1", 256: "field_mean_seg256_last1", 768: "field_nopool"}
-SEED_RUNS = {"ki": ["ki", "ki_s1", "ki_s2"],
+SEED_RUNS = {"dd": ["dd", "dd_s1", "dd_s2"],
              **{m: [n, f"{n}_s1", f"{n}_s2"] for m, (n, _) in POOL_RUNS.items()}}
 HEAD = ["model.visual.ln_post.weight", "model.visual.ln_post.bias", "model.visual.proj", "model.logit_scale"]
 CGAS_HEAD = ["cgas_head.net.1.weight", "cgas_head.net.1.bias", "cgas_head.net.3.weight", "cgas_head.net.3.bias"]
@@ -114,7 +114,7 @@ def gradient_fill(ax, x, y, color: str, base: float, top_alpha: float = 0.22) ->
 
 def run_dir(name: str) -> Path:
     # most pooling/capacity runs were archived to scratch when field_alpha's test-time path was removed;
-    # anything still under runs/ (ki, froster, cgas itself) is checked first
+    # anything still under runs/ (dd, froster, cgas itself) is checked first
     local = RUNS / name
     return local if local.exists() else ARCHIVE_RUNS / name
 
@@ -153,7 +153,7 @@ def cgas_logits(w: dict, cls: torch.Tensor, seg: int, mode: str, w1: torch.Tenso
 
 def impulse_data() -> dict:
     # one real frame from each of 48 HMDB classes, a norm-5 kick to block 1's CLS input, tracked through all 12 blocks
-    cfg = load_config([str(REPO_ROOT / "configs/b2n/hmdb51.yaml")])
+    cfg = load_config([str(REPO_ROOT / "configs/b2n/default/hmdb51.yaml")])
     seen, videos = set(), []
     for split in (BASE, NOVEL):
         for line in cfg.split_csv(split).read_text().splitlines():
@@ -173,7 +173,7 @@ def impulse_data() -> dict:
             frames.append((rgb - mean) / std)
     imgs = torch.stack(frames)
 
-    ckpt = torch.load(run_dir("ki") / "averaged.pt", map_location="cpu", weights_only=False)
+    ckpt = torch.load(run_dir("dd") / "averaged.pt", map_location="cpu", weights_only=False)
     known = {f.name for f in fields(ModelConfig)}
     cfg = replace(cfg, model=ModelConfig(**{k: v for k, v in ckpt["config"]["model"].items() if k in known}))
     model = build_kiclip(cfg, {k[len("model."):]: v for k, v in ckpt["model"].items() if k.startswith("model.")})
@@ -181,14 +181,14 @@ def impulse_data() -> dict:
     model.eval()
     del ckpt
     visual = model.model.visual
-    blocks, frozen = visual.transformer.resblocks, visual.transformer.resblocks_f
+    blocks, frozen = visual.transformer.resblocks, visual.transformer.resblocks_dd
 
-    def run(embed, kick, inject):
+    def run(embed, kick, damp):
         x, t = embed.clone(), embed.clone()
         x[:, 0] += kick
         out = []
         for i, blk in enumerate(blocks):
-            if inject:
+            if damp:
                 x, t = (x + t) / 2, frozen[i](t)
             x = blk(x)
             out.append(x[:, 0])
@@ -206,11 +206,11 @@ def impulse_data() -> dict:
             off.append((run(embed, kick, False) - run(embed, zero, False)).norm(dim=-1))
     del model
     gc.collect()
-    return {"with_inj": torch.cat(on).numpy(), "without_inj": torch.cat(off).numpy()}
+    return {"with_dd": torch.cat(on).numpy(), "without_dd": torch.cat(off).numpy()}
 
 
 def contraction_data() -> dict:
-    s = torch.load(dump_path("ki"), map_location="cpu", mmap=True, weights_only=True)["splits"][TRAIN]
+    s = torch.load(dump_path("dd"), map_location="cpu", mmap=True, weights_only=True)["splits"][TRAIN]
     cls, stream = s["cls"].float(), s["stream"].float()
     return {"before": torch.stack([(cls[:, l - 1] - stream[:, l]).norm(dim=-1) for l in range(1, 12)], 1).numpy()}
 
@@ -322,12 +322,12 @@ def fig_impulse(imp: dict) -> None:
     L = np.arange(1, 13)
     fig, ax = plt.subplots(figsize=(W1, H1))
     handles = []
-    for key, c, lab in (("without_inj", ORANGE, "Without injection"), ("with_inj", BLUE, "With injection")):
+    for key, c, lab in (("without_dd", ORANGE, "Without Drift Damping"), ("with_dd", BLUE, "With Drift Damping")):
         v = imp[key]
         ax.fill_between(L, np.percentile(v, 10, 0), np.percentile(v, 90, 0), color=tint(c, 0.55), alpha=0.55,
                         linewidth=0, zorder=2)
         handles.append(series(ax, L, np.median(v, 0), c, lab))
-    ideal = np.median(imp["with_inj"], 0)[0] * 0.5 ** (L - 1)
+    ideal = np.median(imp["with_dd"], 0)[0] * 0.5 ** (L - 1)
     handles += ax.plot(L, ideal, color=GRAY, linewidth=1.1, linestyle=(0, (3.5, 2.5)), zorder=3,
                        label="Ideal ×½ per block")
     ax.set_yscale("log")
@@ -338,7 +338,7 @@ def fig_impulse(imp: dict) -> None:
     ax.set_xlabel("Block")
     ax.set_ylabel("Perturbation Norm")
     legend(ax, handles=handles, loc="lower left")
-    fig.savefig(OUT / "ki_impulse_response.png")
+    fig.savefig(OUT / "dd_impulse_response.png")
     plt.close(fig)
 
 
@@ -361,7 +361,7 @@ def fig_contraction(con: dict) -> None:
     ax.set_xlabel("Block")
     ax.set_ylabel("Drift From Frozen Stream")
     legend(ax, handles=handles, loc="upper left")
-    fig.savefig(OUT / "ki_contraction.png")
+    fig.savefig(OUT / "dd_contraction.png")
     plt.close(fig)
 
 
@@ -422,12 +422,12 @@ def fig_concentration(pool: dict) -> None:
 def fig_seeds() -> None:
     rng = np.random.default_rng(1)
     modes = ("max", "min", "none", "mean", "dropout")
-    ki = np.array([hm(r) for r in SEED_RUNS["ki"]])
+    dd = np.array([hm(r) for r in SEED_RUNS["dd"]])
     fig, ax = plt.subplots(figsize=(W1 + 0.8, H1))
-    ax.axhspan(ki.mean() - ki.std(ddof=1), ki.mean() + ki.std(ddof=1), color=tint(GRAY, 0.6), alpha=0.45,
+    ax.axhspan(dd.mean() - dd.std(ddof=1), dd.mean() + dd.std(ddof=1), color=tint(GRAY, 0.6), alpha=0.45,
                linewidth=0, zorder=1)
-    ax.axhline(ki.mean(), color=GRAY, linewidth=1.1, linestyle=(0, (3.5, 2.5)), zorder=2)
-    ax.text(len(modes) - 0.45, ki.mean() + 0.06, "KI, no CGAS", color=SUB, ha="right", va="bottom")
+    ax.axhline(dd.mean(), color=GRAY, linewidth=1.1, linestyle=(0, (3.5, 2.5)), zorder=2)
+    ax.text(len(modes) - 0.45, dd.mean() + 0.06, "Drift Damping, no CGAS", color=SUB, ha="right", va="bottom")
     for i, mode in enumerate(modes):
         lab, c = MODE_STYLE[mode]
         v = np.array([hm(r) for r in SEED_RUNS[mode] if (run_dir(r) / "results.json").exists()])

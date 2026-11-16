@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.config import Config
-from src.models.clip import CLIP, pretrained_state, with_frozen_copy
+from src.models.clip import CLIP, _alias_legacy_damping_keys, pretrained_state, with_frozen_copy
 from src.models.cgas import CGASHead, build_cgas_input, sample_pool_mode
 
 TEXT_CHUNK = 2048
@@ -76,14 +76,14 @@ def aux_classifier(dim: int, num_classes: int) -> nn.Sequential:
 
 
 class KICLIP(nn.Module):
-    # the student CLIP, the frozen pretrained CLIP (teacher) it is distilled towards and injected from, the projectors
+    # the student CLIP, the frozen pretrained CLIP (teacher) it is distilled towards and damped from, the projectors
 
     def __init__(
         self,
         model: CLIP,
         num_frames: int,
         teacher: CLIP | None = None,
-        inject: bool = False,
+        drift_damping: bool = False,
         distill: bool = False,
         alpha: float = 0.1,
         aux: bool = False,
@@ -101,13 +101,15 @@ class KICLIP(nn.Module):
     ):
         super().__init__()
         needs_teacher = (
-            inject or distill or cgas_source in ("teacher", "both") or (cgas_source is not None and cgas_target != "label")
+            drift_damping or distill or cgas_source in ("teacher", "both")
+            or (cgas_source is not None and cgas_target != "label")
         )
         if needs_teacher and teacher is None:
             raise ValueError(
-                "injecting from the teacher, distilling, cgas_source=teacher/both and cgas_target=teacher/both need a teacher"
+                "drift damping from the teacher, distilling, cgas_source=teacher/both and cgas_target=teacher/both "
+                "need a teacher"
             )
-        self.model, self.num_frames, self.inject, self.alpha = model, num_frames, inject, alpha
+        self.model, self.num_frames, self.drift_damping, self.alpha = model, num_frames, drift_damping, alpha
         self.teacher = teacher.eval().requires_grad_(False) if teacher is not None else None
         self.projector_v = residual_projector(model.embed_dim) if distill else None
         self.projector_t = residual_projector(model.embed_dim) if distill else None
@@ -133,6 +135,7 @@ class KICLIP(nn.Module):
         return {k: v for k, v in super().state_dict(*args, **kwargs).items() if not k.startswith("teacher.")}
 
     def load_state_dict(self, state, strict: bool = True, assign: bool = False):
+        state = _alias_legacy_damping_keys(state)
         teacher = {k: v for k, v in super().state_dict().items() if k.startswith("teacher.")}
         return super().load_state_dict({**teacher, **state}, strict, assign)
 
@@ -151,7 +154,7 @@ class KICLIP(nn.Module):
             with torch.no_grad():
                 if needs_teacher_hidden:
                     # teacher_hidden: every block's own output, for CGAS; stream: every block's input (the
-                    # embedding, then every output but the last), for injection -- same as trace()'s "inputs"
+                    # embedding, then every output but the last), for drift damping -- same as trace()'s "inputs"
                     embed = self.teacher.visual.embed(x)
                     teacher_hidden = self.teacher.visual.transformer.hidden(embed)
                     stream = [embed] + teacher_hidden[:-1]
@@ -160,10 +163,10 @@ class KICLIP(nn.Module):
                     target, stream = self.teacher.visual.trace(x)
             target = F.normalize(target, dim=-1)
         if self.cgas_source is not None:
-            student_hidden = self.model.visual.hidden(x, stream if self.inject else None)
+            student_hidden = self.model.visual.hidden(x, stream if self.drift_damping else None)
             frames = self.model.visual.head(student_hidden[-1])
         else:
-            frames = self.model.visual(x, stream if self.inject else None)
+            frames = self.model.visual(x, stream if self.drift_damping else None)
         cgas_raw = None
         if self.cgas_source is not None:
             if self.training:
@@ -247,8 +250,8 @@ class KICLIP(nn.Module):
 def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, num_classes: int = 0) -> KICLIP:
     # weights: a trained student to evaluate; None builds a student to train, starting from the pretrained CLIP
     m = cfg.model
-    blocks = m.inject and m.inject_source == "blocks"
-    from_teacher = m.inject and m.inject_source == "teacher"
+    blocks = m.drift_damping and m.drift_damping_source == "blocks"
+    from_teacher = m.drift_damping and m.drift_damping_source == "teacher"
     distill = weights is None and m.distill_weight > 0
     aux = weights is None and m.aux_classifier
     cgas_needs_teacher = m.cgas_enabled and m.cgas_source in ("teacher", "both")
@@ -262,7 +265,8 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
         weights,
         temporal=m.temporal,
         num_frames=cfg.data.num_frames,
-        inject=blocks,
+        drift_damping=blocks,
+        drift_damping_weight=m.drift_damping_weight,
         grad_checkpointing=m.grad_checkpointing,
     )
     teacher = (
@@ -270,7 +274,7 @@ def build_kiclip(cfg: Config, weights: dict[str, torch.Tensor] | None = None, nu
         else None
     )
     return KICLIP(
-        student, cfg.data.num_frames, teacher, inject=from_teacher, distill=distill, alpha=m.residual_alpha,
+        student, cfg.data.num_frames, teacher, drift_damping=from_teacher, distill=distill, alpha=m.residual_alpha,
         aux=aux, num_classes=num_classes,
         cgas_source=m.cgas_source if m.cgas_enabled else None,
         cgas_segments=m.cgas_segments,

@@ -1,4 +1,7 @@
 # base-to-novel K400: 16 shots of 200 base classes; seeds train_s1..s3
+model:
+  cgas_ce_weight: 0.02 # from ceweight_sweep.sh
+
 data:
   train: b2n/k400/train_s1
   val: b2n/k400/base

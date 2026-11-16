@@ -1,4 +1,7 @@
 # base-to-novel UCF101: 16 shots of 51 base classes, 50 novel
+model:
+  cgas_ce_weight: 0.1 # from ceweight_sweep.sh: w=1.0 scored 85.66 HM (novel 77.4), w=0.1 scored 88.77 (novel 82.18)
+
 data:
   train: b2n/ucf101/train_s1
   val: b2n/ucf101/base

@@ -51,11 +51,11 @@ METHOD_PRETTY = {
 
 
 def method(cfg: dict) -> str:
-    # configs from before model.inject_source injected from frozen block copies / model.aux_classifier existed
-    if not cfg["model"].get("inject", False):
+    # configs from before model.drift_damping_source damped from frozen block copies / model.aux_classifier existed
+    if not cfg["model"].get("drift_damping", False):
         base = "froster"
     else:
-        base = "kiclip" if cfg["model"].get("inject_source", "blocks") == "teacher" else "kiclip_blocks"
+        base = "kiclip" if cfg["model"].get("drift_damping_source", "blocks") == "teacher" else "kiclip_blocks"
     return f"{base}_aux" if cfg["model"].get("aux_classifier", False) else base
 
 

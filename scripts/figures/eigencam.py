@@ -78,9 +78,9 @@ def main() -> None:
             raise SystemExit(f"--layers must be in [1, {depth}] for {spec}")
         tokens = layer_tokens(model, clip.to(device))
         rows.append([eigencam(tokens[layer - 1], cfg.data.crop_size) for layer in args.layers])
-        blocks = model.model.visual.transformer.resblocks_f is not None
-        source = "blocks" if blocks else "teacher" if model.inject else "nothing"
-        print(f"  {spec}: {depth} blocks, injection from {source}")
+        blocks = model.model.visual.transformer.resblocks_dd is not None
+        source = "blocks" if blocks else "teacher" if model.drift_damping else "nothing"
+        print(f"  {spec}: {depth} blocks, drift damping from {source}")
         del model
         torch.cuda.empty_cache()
 

@@ -22,17 +22,26 @@ def pretrained_state(arch: str) -> dict[str, torch.Tensor]:
     return load_state_dict(open_clip.download_pretrained(open_clip.get_pretrained_cfg(arch, "openai")))
 
 
-INJECTED = "visual.transformer.resblocks_f."
+DAMPING_BLOCKS = "visual.transformer.resblocks_dd."
+_LEGACY_DAMPING_BLOCKS = "visual.transformer.resblocks_f."  # pre-rename checkpoints (FROSTER/KICLIP releases too)
+
+
+def _alias_legacy_damping_keys(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {
+        (DAMPING_BLOCKS + k[len(_LEGACY_DAMPING_BLOCKS):] if k.startswith(_LEGACY_DAMPING_BLOCKS) else k): v
+        for k, v in state.items()
+    }
 
 
 def with_frozen_copy(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    # seeds the knowledge-injection blocks with the pretrained vision blocks
+    # seeds the drift-damping blocks with the pretrained vision blocks
     blocks = "visual.transformer.resblocks."
-    return {**state, **{INJECTED + k[len(blocks):]: v for k, v in state.items() if k.startswith(blocks)}}
+    return {**state, **{DAMPING_BLOCKS + k[len(blocks):]: v for k, v in state.items() if k.startswith(blocks)}}
 
 
-def has_injection(state: dict[str, torch.Tensor]) -> bool:
-    return any(k.startswith(INJECTED) for k in state)
+def has_drift_damping(state: dict[str, torch.Tensor]) -> bool:
+    state = _alias_legacy_damping_keys(state)
+    return any(k.startswith(DAMPING_BLOCKS) for k in state)
 
 
 def expand_temporal(x: torch.Tensor, num_frames: int) -> torch.Tensor:
@@ -102,18 +111,20 @@ class Transformer(nn.Module):
         causal: bool = False,
         temporal: str | None = None,
         num_frames: int = 1,
-        inject: bool = False,
+        drift_damping: bool = False,
+        drift_damping_weight: tuple[float, float] = (0.5, 0.5),
         grad_checkpointing: bool = False,
     ):
         super().__init__()
         self.grad_checkpointing = grad_checkpointing
+        self.drift_damping_weight = drift_damping_weight
         self.resblocks = nn.ModuleList(
             ResidualAttentionBlock(width, heads, causal, temporal, num_frames) for _ in range(layers)
         )
-        # knowledge injection: a frozen frame-wise copy of the pretrained blocks, fed the same tokens
-        self.resblocks_f = (
+        # drift damping: a frozen frame-wise copy of the pretrained blocks, fed the same tokens
+        self.resblocks_dd = (
             nn.ModuleList(ResidualAttentionBlock(width, heads, causal) for _ in range(layers)).requires_grad_(False)
-            if inject else None
+            if drift_damping else None
         )
 
     def _run(self, block: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -121,14 +132,18 @@ class Transformer(nn.Module):
             return checkpoint(block, x, use_reentrant=False)
         return block(x)
 
+    def _mix(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        w_student, w_frozen = self.drift_damping_weight
+        return w_student * x + w_frozen * t
+
     def forward(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> torch.Tensor:  # (N, L, D)
-        # frozen: another model's input to every block (see trace), averaged in before the block like resblocks_f's
+        # frozen: another model's input to every block (see trace), averaged in before the block like resblocks_dd's
         t = x
         for i, block in enumerate(self.resblocks):
-            if self.resblocks_f is not None:
-                x, t = (x + t) / 2, self._run(self.resblocks_f[i], t)
+            if self.resblocks_dd is not None:
+                x, t = self._mix(x, t), self._run(self.resblocks_dd[i], t)
             elif frozen is not None:
-                x = (x + frozen[i]) / 2
+                x = self._mix(x, frozen[i])
             x = self._run(block, x)
         return x
 
@@ -140,13 +155,13 @@ class Transformer(nn.Module):
         return x, inputs
 
     def hidden(self, x: torch.Tensor, frozen: list[torch.Tensor] | None = None) -> list[torch.Tensor]:
-        # every block's own output, (N, L, D) each; frozen: as in forward, injection's effect on the input
+        # every block's own output, (N, L, D) each; frozen: as in forward, drift damping's effect on the input
         t, outputs = x, []
         for i, block in enumerate(self.resblocks):
-            if self.resblocks_f is not None:
-                x, t = (x + t) / 2, self._run(self.resblocks_f[i], t)
+            if self.resblocks_dd is not None:
+                x, t = self._mix(x, t), self._run(self.resblocks_dd[i], t)
             elif frozen is not None:
-                x = (x + frozen[i]) / 2
+                x = self._mix(x, frozen[i])
             x = self._run(block, x)
             outputs.append(x)
         return outputs
@@ -163,7 +178,8 @@ class VisionTransformer(nn.Module):
         output_dim: int,
         temporal: str | None = None,
         num_frames: int = 1,
-        inject: bool = False,
+        drift_damping: bool = False,
+        drift_damping_weight: tuple[float, float] = (0.5, 0.5),
         grad_checkpointing: bool = False,
     ):
         super().__init__()
@@ -174,8 +190,8 @@ class VisionTransformer(nn.Module):
         self.positional_embedding = nn.Parameter(scale * torch.randn((resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
         self.transformer = Transformer(
-            width, layers, heads, temporal=temporal, num_frames=num_frames, inject=inject,
-            grad_checkpointing=grad_checkpointing,
+            width, layers, heads, temporal=temporal, num_frames=num_frames, drift_damping=drift_damping,
+            drift_damping_weight=drift_damping_weight, grad_checkpointing=grad_checkpointing,
         )
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
@@ -220,13 +236,15 @@ class CLIP(nn.Module):
         text_layers: int,
         temporal: str | None = None,
         num_frames: int = 1,
-        inject: bool = False,
+        drift_damping: bool = False,
+        drift_damping_weight: tuple[float, float] = (0.5, 0.5),
         grad_checkpointing: bool = False,
     ):
         super().__init__()
         self.visual = VisionTransformer(
             resolution, patch_size, vision_width, vision_layers, vision_width // 64, embed_dim,
-            temporal=temporal, num_frames=num_frames, inject=inject, grad_checkpointing=grad_checkpointing,
+            temporal=temporal, num_frames=num_frames, drift_damping=drift_damping,
+            drift_damping_weight=drift_damping_weight, grad_checkpointing=grad_checkpointing,
         )
         self.transformer = Transformer(
             text_width, text_layers, text_heads, causal=True, grad_checkpointing=grad_checkpointing
@@ -239,6 +257,7 @@ class CLIP(nn.Module):
 
     @classmethod
     def from_state_dict(cls, state: dict[str, torch.Tensor], strict: bool = True, **kwargs) -> CLIP:
+        state = _alias_legacy_damping_keys(state)
         model = cls(**_dims(state), **kwargs)
         model.load_state_dict(state, strict=strict)
         return model

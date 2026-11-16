@@ -14,7 +14,7 @@ subcommands:
     test    evaluate a checkpoint on data.test (or --splits)
 
 --config can be repeated; later files override earlier ones, e.g.
-    --config configs/b2n/hmdb51.yaml --config configs/methods/froster.yaml
+    --config configs/b2n/default/hmdb51.yaml --config configs/methods/froster.yaml
 """
 
 
@@ -22,11 +22,11 @@ def main(argv=None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--config", action="append", default=[],
-        help="YAML config(s) merged over configs/default.yaml in order, e.g. configs/b2n/k400.yaml",
+        help="YAML config(s) merged over configs/default.yaml in order, e.g. configs/b2n/default/k400.yaml",
     )
     common.add_argument(
         "--set", action="append", metavar="KEY=VAL", default=[],
-        help="override any config key, e.g. --set train.epochs=12 --set model.inject=false",
+        help="override any config key, e.g. --set train.epochs=12 --set model.drift_damping=false",
     )
     parser = argparse.ArgumentParser(
         prog="kiclip.py",

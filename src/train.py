@@ -174,11 +174,11 @@ def log_header(cfg: Config, run_dir, device, world: int, per_gpu_batch: int, ste
     logger.info("student      : %s OpenAI CLIP | temporal %s | grad checkpointing %s",
                 m.arch, m.temporal, m.grad_checkpointing)
     source = {"teacher": "the teacher's activations", "blocks": "frozen block copies run on the student's stem"}
-    logger.info("injection    : %s", f"{source[m.inject_source]}, averaged in before every vision block"
-                if m.inject else "off")
+    logger.info("drift damping: %s", f"{source[m.drift_damping_source]}, weight {m.drift_damping_weight}, "
+                f"averaged in before every vision block" if m.drift_damping else "off")
     logger.info("teacher      : %s", f"frozen {m.arch} | distill_weight {m.distill_weight:g} | "
                 f"residual_alpha {m.residual_alpha:g}"
-                if m.distill_weight > 0 or (m.inject and m.inject_source == "teacher") else "off")
+                if m.distill_weight > 0 or (m.drift_damping and m.drift_damping_source == "teacher") else "off")
     logger.info("aux classif. : %s", "a fresh MLP on the pooled video embedding, trained with CE"
                 if m.aux_classifier else "off")
     logger.info("cgas         : %s", (
@@ -215,7 +215,7 @@ def log_param_counts(model: KICLIP) -> None:
         logger.info("  %-22s %12s  (%4.1f%%)", name, f"{n:,}", 100 * n / max(total, 1))
     logger.info("  %-22s %12s", "TOTAL trainable", f"{total:,}")
     frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    logger.info("  %-22s %12s  (teacher, injection blocks)", "frozen", f"{frozen:,}")
+    logger.info("  %-22s %12s  (teacher, drift-damping blocks)", "frozen", f"{frozen:,}")
 
 
 def train(cfg: Config, run_name: str | None = None) -> dict:

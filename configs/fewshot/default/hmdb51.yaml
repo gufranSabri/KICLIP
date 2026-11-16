@@ -1,0 +1,11 @@
+# few-shot HMDB51: all 51 classes, K training clips per class (ViFi-CLIP's split1 few-shot files, the
+# standard OST/MoTE/MSTA reuse); data.train set per-K by scripts/run_fewshot.sh. Test is val1, all 51 classes.
+data:
+  train: fewshot/hmdb51/train_k16
+  val: fewshot/hmdb51/val1
+  test: [fewshot/hmdb51/val1]
+
+train:
+  epochs: 12
+  batch_size: 4 # reference/KICLIP's TRAIN.BATCH_SIZE, no gradient accumulation
+  eval_every: 0

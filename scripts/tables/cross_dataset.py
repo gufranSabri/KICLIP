@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Scans runs/ for K400-trained runs and emits the cross-dataset table per method, next to FROSTER's paper numbers.
 #
-#     bash scripts/experiments/cross_dataset.sh
+#     bash scripts/experiments/run_zeroshot.sh
 #     python scripts/tables/cross_dataset.py
 
 from __future__ import annotations

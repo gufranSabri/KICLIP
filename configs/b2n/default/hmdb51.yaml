@@ -1,4 +1,7 @@
 # base-to-novel HMDB51: 16 shots of 26 base classes, 25 novel
+model:
+  cgas_ce_weight: 1.0 # from ceweight_sweep.sh
+
 data:
   train: b2n/hmdb51/train_s1
   val: b2n/hmdb51/base

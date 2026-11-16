@@ -6,7 +6,7 @@
 
 salloc --gpus-per-node=l40s:1 --cpus-per-task=16 --mem=24G --time=3:00:00 --account=aip-lsigal
 # salloc --gpus-per-node=l40s:4 --cpus-per-task=32 --mem=128G --time=12:00:00 --account=aip-lsigal
-# salloc --gpus-per-node=h100:1 --cpus-per-task=16 --mem=64G --time=1:00:00 --account=aip-lsigal
+# salloc --gpus-per-node=h100:1 --cpus-per-task=16 --mem=64G --time=3:00:00 --account=aip-lsigal
 
 # ── STEP 1: ENVIRONMENT ────────────────────────────────────────────────────
 
@@ -29,5 +29,15 @@ python scripts/data/organize.py --check --workers 8 --delete-raw
 
 # ── STEP 2: EXPERIMENTS ─────────────────────────────────────────────────────
 
-bash scripts/run_b2n.sh       # main CGAS experiments, all datasets
-bash scripts/field_study.sh   # mechanism ablations behind docs/cgas.md 
+bash scripts/experiments/ceweight_sweep.sh
+python scripts/pick_best_config.py --runs-root runs/ceweight_sweep
+
+bash scripts/experiments/seed_ablation.sh
+bash scripts/experiments/run_b2n.sh
+bash scripts/experiments/run_fewshot.sh
+bash scripts/experiments/run_zeroshot.sh
+
+# ── STEP 3: CGAS ABLATIONS ──────────────────────────────────────────────────
+
+bash scripts/experiments/field_study.sh
+bash scripts/experiments/distill_cgas_weight_sweep.sh
