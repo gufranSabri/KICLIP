@@ -6,7 +6,7 @@
 
 salloc --gpus-per-node=l40s:1 --cpus-per-task=16 --mem=24G --time=3:00:00 --account=aip-lsigal
 # salloc --gpus-per-node=l40s:4 --cpus-per-task=32 --mem=128G --time=12:00:00 --account=aip-lsigal
-# salloc --gpus-per-node=h100:1 --cpus-per-task=16 --mem=64G --time=3:00:00 --account=aip-lsigal
+# salloc --gpus-per-node=h100:1 --cpus-per-task=16 --mem=24G --time=3:00:00 --account=aip-lsigal
 
 # ── STEP 1: ENVIRONMENT ────────────────────────────────────────────────────
 
@@ -41,3 +41,19 @@ bash scripts/experiments/run_zeroshot.sh
 
 bash scripts/experiments/field_study.sh
 bash scripts/experiments/distill_cgas_weight_sweep.sh
+
+# ── STEP 4: DCGD NARRATIVE FIGURES (HMDB-51 only) ───────────────────────────
+# needs runs/main/hmdb51_{froster,dd,cgas_noki,cgas} from run_b2n.sh
+
+bash scripts/experiments/pooling_sweep.sh
+bash scripts/experiments/capacity_sweep.sh
+bash scripts/experiments/cgas_target_ablation.sh
+
+python scripts/analysis/dcgd_figures.py impulse --checkpoint runs/main/hmdb51_dd
+python scripts/analysis/dcgd_figures.py scatter \
+    --checkpoints runs/main/hmdb51_froster runs/main/hmdb51_dd runs/main/hmdb51_cgas_noki runs/main/hmdb51_cgas \
+    --labels FROSTER "Drift Damping" CGAS DCGD
+python scripts/analysis/dcgd_figures.py concentration --checkpoint runs/pooling_sweep/mean
+python scripts/analysis/dcgd_figures.py distance \
+    --checkpoints runs/main/hmdb51_froster runs/main/hmdb51_dd runs/main/hmdb51_cgas_noki runs/main/hmdb51_cgas \
+    --labels FROSTER "Drift Damping" CGAS DCGD

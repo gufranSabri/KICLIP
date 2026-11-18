@@ -26,7 +26,9 @@ pip install $PIP_FLAGS \
   numpy \
   pyyaml \
   tqdm \
-  matplotlib
+  matplotlib \
+  scikit-learn
+
 
 echo "[install] core dependencies OK"
 
