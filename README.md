@@ -1,20 +1,24 @@
 # KICLIP
 
-**Drift Damping Improves Distillation: open-vocabulary action recognition built on FROSTER (ICLR 2024).**
+**DCGD (Drift Damping + Capacity-Gated Auxiliary Supervision): open-vocabulary action recognition built on FROSTER (ICLR 2024).**
 
-A student CLIP is fine-tuned on videos while it is kept close to the original CLIP in two ways:
+A student CLIP is fine-tuned on videos while it is kept close to the original CLIP, and pushed to use more of its
+own capacity, in three ways:
 
 1. **Distillation (FROSTER)**: residual projectors on the student's frame and class features (`x + 0.1 * MLP(x)`)
    are pulled to a frozen CLIP teacher's with a cosine loss, weighted by `model.distill_weight`.
-2. **Drift damping (KICLIP)**: before every student vision block, its tokens are averaged with the frozen
-   teacher's tokens at the same depth (`model.drift_damping`). The teacher's forward pass is shared with distillation,
-   so drift damping costs no extra compute in training. It is active at test time too. The original KICLIP instead
-   ran frozen copies of the blocks on the student's own stem and backpropagated through them
-   (`model.drift_damping_source: blocks`, about 1.36x the training FLOPs).
-3. **Aux classifier (training only, needs distillation on)**: a fresh MLP on the pooled, distillation-projected
-   video embedding, trained with cross-entropy on the training classes alongside the rest of the loss. In
-   reference/KICLIP this head is seeded from a pretrained ImageNet ViT-B/16 classifier and its loss is computed but
-   never added to training (left commented out); here it is a fresh MLP and its loss is added.
+2. **Drift damping**: before every student vision block, its tokens are averaged with the frozen teacher's tokens
+   at the same depth (`model.drift_damping`). With `model.drift_damping_source: teacher` this reads the frozen
+   teacher's own activations (shared forward pass with distillation, no extra training compute, active at test
+   time too). The original KICLIP instead set `drift_damping_source: blocks`: frozen copies of the blocks run on
+   the student's own stem and are backpropagated through (about 1.36x the training FLOPs).
+3. **CGAS (Capacity-Gated Auxiliary Supervision)**: every chosen vision block's CLS token is pooled (mean/max/min/
+   dropout, `model.cgas_pool_modes`) down to a narrow width (`model.cgas_segments`) — narrow enough that an
+   auxiliary open-vocabulary head (`CGASHead`, projecting to the text tower's embed_dim, scored by cosine
+   similarity against class text embeddings) cannot fit its own loss without pushing gradient back into the shared
+   backbone. Trained with `model.cgas_ce_weight` against the training labels, a frozen-CLIP soft target, or both
+   (`model.cgas_target`, `model.cgas_tau`). Gated by `model.cgas_enabled`; the head's own learning rate is
+   `model.cgas_lr`. Drift damping + CGAS together is DCGD, the full method.
 
 The student's vision attention also reads the keys/values of each frame's neighbours (`model.temporal: expand`),
 class embeddings come from an ensemble of templated GPT-rephrased descriptions, and `averaged.pt` is the mean of
@@ -27,14 +31,16 @@ kiclip.py              CLI: train / test
 kiclip.slurm           batch job running every experiment for $METHODS, then the tables
 src/models/clip.py     OpenAI CLIP as plain modules (names match the checkpoints), temporal attention, drift damping
 src/models/kiclip.py   student wrapper: frozen teacher (drift damping + distillation), projectors, distillation loss
+src/models/cgas.py     CGASHead and its pooling (mean/max/min/dropout)
 src/eigencam.py        EigenCAM over the vision blocks
 src/data/              PyAV decoding, clip sampling and transforms, prompt templates
 src/train.py           training loop (AMP, DDP, resume, online weight averaging)
 src/test.py            multi-view evaluation
-configs/               default.yaml (KICLIP), one yaml per (protocol, dataset), methods/*.yaml overlays
+configs/               default.yaml (DCGD), configs/{b2n,cross,fewshot}/default/<dataset>.yaml, best/<dataset>.yaml
+                       (written by scripts/pick_best_config.py), methods/*.yaml overlays
 splits/                FROSTER's split CSVs and class-description JSONs
 scripts/               install.sh, troubleshooting.sh, data/ (download + organize), experiments/*.sh, tables/*.py,
-                       figures/eigencam.py
+                       figures/{eigencam,select_eigencam_indices}.py, analysis/ (style.py, dcgd_figures.py, common.py)
 ```
 
 ## Install
@@ -96,24 +102,27 @@ A split is `<protocol>/<dataset>/<set>`, i.e. `splits/<protocol>/<dataset>/<set>
 
 ## Methods
 
-`configs/default.yaml` is KICLIP. Stack a method overlay after the dataset config to pick the method explicitly:
+`configs/default.yaml` has drift damping on (`drift_damping_source: blocks`, the original KICLIP) with CGAS off.
+Stack a method overlay after the dataset config to pick a method explicitly, or set `model.cgas_enabled` yourself
+for the full DCGD method:
 
 | Overlay | `model.drift_damping` | `model.drift_damping_source` |
 |---|---|---|
-| `configs/methods/kiclip.yaml` | true | `teacher` |
+| `configs/methods/kiclip.yaml` | true | `blocks` (kept as `blocks`, not `teacher`, to match what it was swept with) |
 | `configs/methods/kiclip_blocks.yaml` (original KICLIP) | true | `blocks` |
 | `configs/methods/froster.yaml` | false | - |
+| `configs/methods/cgas.yaml` | - | - (sets the `cgas_*` keys; stack on top of drift damping for DCGD) |
 
 Checkpoints hold the student only; the teacher is rebuilt from the pretrained weights.
 
 ## Usage
 
 ```bash
-python kiclip.py --config configs/b2n/hmdb51.yaml train --run-name b2n_hmdb51_s1_kiclip
-python kiclip.py --config configs/b2n/hmdb51.yaml test  --checkpoint runs/b2n_hmdb51_s1_kiclip/averaged.pt
-python kiclip.py --config configs/b2n/k400.yaml --config configs/methods/froster.yaml train --run-name b2n_k400_s2_froster \
+python kiclip.py --config configs/b2n/default/hmdb51.yaml train --run-name b2n_hmdb51_s1_kiclip
+python kiclip.py --config configs/b2n/default/hmdb51.yaml test  --checkpoint runs/b2n_hmdb51_s1_kiclip/averaged.pt
+python kiclip.py --config configs/b2n/default/k400.yaml --config configs/methods/froster.yaml train --run-name b2n_k400_s2_froster \
     --set data.train=b2n/k400/train_s2
-python kiclip.py --config configs/cross/k400.yaml test --checkpoint runs/cross_k400_kiclip/averaged.pt --splits cross/k600/split1
+python kiclip.py --config configs/cross/default/k400.yaml test --checkpoint runs/cross_k400_kiclip/averaged.pt --splits cross/k600/split1
 ```
 
 `--config` can be repeated (later files win) and `--set key=value` overrides any key, on either side of the
@@ -125,7 +134,7 @@ Multi-GPU runs go through `torchrun`; `train.batch_size` is global and split eve
 reference/KICLIP — no gradient accumulation:
 
 ```bash
-torchrun --standalone --nproc_per_node=4 kiclip.py --config configs/cross/k400.yaml train --run-name cross_k400_kiclip
+torchrun --standalone --nproc_per_node=4 kiclip.py --config configs/cross/default/k400.yaml train --run-name cross_k400_kiclip
 ```
 
 A run directory holds `config.json`, `train.log`, `history.json`, a code snapshot, `last.pt` while training
@@ -135,7 +144,7 @@ A run directory holds `config.json`, `train.log`, `history.json`, a code snapsho
 
 ```bash
 python scripts/figures/eigencam.py --split b2n/hmdb51/novel --index 0 \
-    --checkpoints runs/b2n_hmdb51_s1_froster/averaged.pt runs/b2n_hmdb51_s1_kiclip/averaged.pt --labels FROSTER KICLIP
+    --checkpoints runs/main/hmdb51_froster/averaged.pt runs/main/hmdb51_cgas/averaged.pt --labels FROSTER DCGD
 python scripts/figures/eigencam.py --video some_clip.mp4 --checkpoints clip runs/cross_k400_kiclip/averaged.pt
 ```
 
@@ -147,17 +156,27 @@ Writes `docs/figures/eigencam/<video>.png` and `.pdf`.
 
 ## Experiments
 
+`scripts/troubleshooting.sh` is the full interactive pipeline (run command-by-command in a SLURM session, not as a
+whole): allocate, environment, data, then a sweep to pick each dataset's best hyperparameters
+(`scripts/pick_best_config.py` writes `configs/{b2n,cross,fewshot}/best/<dataset>.yaml`), the main experiments, and
+the CGAS ablations behind the DCGD narrative figures.
+
 ```bash
-bash scripts/experiments/run_b2n.sh          # hmdb51/ucf101/k400 x {froster, drift damping, cgas}: train,
-                                              # test base + novel, then one EigenCAM grid per dataset
-bash scripts/experiments/seed_ablation.sh    # cgas only: 3 seeds (hmdb51/ucf101) or 3 splits (k400)
+bash scripts/experiments/ceweight_sweep.sh   # sweep model.cgas_ce_weight, then pick_best_config.py
+bash scripts/experiments/run_b2n.sh          # hmdb51/ucf101/k400 x {froster, drift damping, cgas-no-dd, dcgd}:
+                                              # train, test base + novel, then one EigenCAM grid per dataset
+bash scripts/experiments/seed_ablation.sh    # 3 seeds (hmdb51/ucf101) or 3 splits (k400)
+bash scripts/experiments/run_fewshot.sh      # HMDB51/UCF101, K={2,4,8,16} shots, all classes
 bash scripts/experiments/run_zeroshot.sh     # K400 (PERCENT% of it, default 5) -> UCF101 / HMDB51 / K600
-python scripts/tables/b2n.py                 # docs/tables/b2n.md, per method, with FROSTER's paper numbers
-python scripts/tables/cross_dataset.py       # docs/tables/cross_dataset.md
-mkdir -p slurm && sbatch kiclip.slurm        # all of the above on 4 L40S
+python scripts/tables/b2n.py                 # base-to-novel table, per method, with FROSTER's paper numbers
+python scripts/tables/cross_dataset.py       # cross-dataset table, with FROSTER's paper numbers
+python scripts/tables/main_results.py        # best full-DCGD run per dataset, across every sweep
 ```
 
-scripts/experiments/run_b2n.sh skips finished work (an existing `averaged.pt`/`results.json` is reused).
+Every `run_*.sh` skips finished work (an existing `averaged.pt`/`results.json` is reused). The remaining sweeps
+(`pooling_sweep.sh`, `capacity_sweep.sh`, `cgas_target_ablation.sh`, `distill_cgas_weight_sweep.sh`) and
+`scripts/analysis/dcgd_figures.py` (impulse/scatter/concentration/distance) are the CGAS mechanism ablations; see
+`scripts/troubleshooting.sh` for the exact invocations.
 
 ## Differences from the original code
 
